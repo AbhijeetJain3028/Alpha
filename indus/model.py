@@ -126,7 +126,13 @@ class Block(nn.Module):
         self.norm_1 = RMSNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.norm_2 = RMSNorm(config.n_embd)
-        self.mlp = SwiGLU(config)
+        if getattr(config, "use_moe", False) and config.n_experts > 1:
+            from .moe import MoESwiGLU
+            self.mlp = MoESwiGLU(config)
+            self.is_moe = True
+        else:
+            self.mlp = SwiGLU(config)
+            self.is_moe = False
 
     def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.norm_1(x), cos, sin)
@@ -193,8 +199,11 @@ class IndusLM(nn.Module):
 
         x = self.tok_emb(idx)
         x = self.dropout(x)
+        aux = 0.0
         for block in self.blocks:
             x = block(x, cos, sin)
+            if getattr(block, "is_moe", False):
+                aux = aux + block.mlp.aux_loss
         x = self.norm_f(x)
 
         if targets is not None:
@@ -202,6 +211,10 @@ class IndusLM(nn.Module):
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1),
                 ignore_index=-100)
+            if getattr(self.config, "use_moe", False) and self.training:
+                n_moe = sum(1 for b in self.blocks if b.is_moe)
+                if n_moe:
+                    loss = loss + 0.01 * aux / n_moe
         else:
             logits = self.lm_head(x)
             loss = None
@@ -242,3 +255,23 @@ def create_model(config: IndusConfig, device: str = "cpu") -> IndusLM:
     print(f"Indus ({config.name}): {n_params / 1e6:.2f}M parameters "
           f"({model.num_params(non_embedding=False) / 1e6:.2f}M with embeddings)")
     return model.to(device)
+
+
+@torch.no_grad()
+def ensure_vocab_size(model: IndusLM, new_vocab: int) -> bool:
+    """Grow the embedding table to new_vocab rows deterministically.
+
+    New special-token rows (chat markers etc.) are initialized by copying
+    the <|endoftext|> row instead of leaving random init - random rows poison
+    generation when a pretrained ckpt is loaded with an enlarged tokenizer.
+    Keeps input/output tying intact. Returns True if resized.
+    """
+    cur = model.config.vocab_size
+    if new_vocab <= cur:
+        return False
+    w = model.tok_emb.weight.data
+    pad = w[cur - 1:cur].expand(new_vocab - cur, -1).clone()
+    model.tok_emb.weight = nn.Parameter(torch.cat([w, pad], dim=0))
+    model.lm_head.weight = model.tok_emb.weight      # preserve weight tying
+    model.config.vocab_size = new_vocab
+    return True

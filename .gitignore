@@ -28,3 +28,6 @@ corpus/
 logs/
 webapp/__pycache__/
 kaggle/
+
+# runtime knowledge store
+knowledge/

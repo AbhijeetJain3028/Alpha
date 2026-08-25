@@ -203,6 +203,15 @@ def main() -> None:
     step = ckpt.get("step", "?")
 
     tok = BPETokenizer.load(args.tokenizer)
+    if len(tok.vocab) != cfg.vocab_size:
+        alt = "data/tokenizer.json"
+        print(f"[warn] tokenizer vocab {len(tok.vocab)} != ckpt "
+              f"vocab {cfg.vocab_size}")
+        if os.path.exists(alt) and \
+                len(BPETokenizer.load(alt).vocab) == cfg.vocab_size:
+            args.tokenizer = alt
+            tok = BPETokenizer.load(alt)
+            print(f"[warn] switched to matching tokenizer: {alt}")
 
     results = {"checkpoint_step": step, "params_M":
                round(model.num_params() / 1e6, 2)}

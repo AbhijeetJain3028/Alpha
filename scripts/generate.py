@@ -15,7 +15,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from indus.config import IndusConfig                    # noqa: E402
-from indus.model import IndusLM                         # noqa: E402
+from indus.model import IndusLM, ensure_vocab_size      # noqa: E402
 from indus.tokenizer import BPETokenizer, ENDOFTEXT     # noqa: E402
 
 
@@ -23,11 +23,14 @@ def load_model(ckpt_path: str, device: str) -> tuple[IndusLM, IndusConfig]:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = IndusConfig.from_dict(ckpt["config"])
     model = IndusLM(cfg).to(device)
-    model.load_state_dict(ckpt["model"])
+    state = {k: v.cpu() for k, v in ckpt["model"].items()}
+    model.load_state_dict(state, strict=False)
     model.eval()
+    n = model.num_params()
     print(f"loaded {ckpt_path} "
           f"({cfg.name}, step={ckpt.get('step', '?')}, "
-          f"val_loss={ckpt.get('val_loss', float('nan')):.3f})")
+          f"{n / 1e6:.2f}M non-emb params, "
+          f"{model.num_params(non_embedding=False) / 1e6:.2f}M total)")
     return model, cfg
 
 
@@ -117,11 +120,15 @@ def main() -> None:
     tok_path = args.tokenizer or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(args.ckpt))),
         "data_v2", "tokenizer.json")
-    if not os.path.exists(tok_path):
-        tok_path = "data/tokenizer.json"
-    if not os.path.exists(tok_path):
-        tok_path = "data_v2/tokenizer.json"
+    for cand in (tok_path, "data/tokenizer.json", "data_v2/tokenizer.json"):
+        if os.path.exists(cand):
+            tok_path = cand
+            break
     tok = BPETokenizer.load(tok_path)
+    tok.add_chat_specials()          # parity with webapp; idempotent
+    ensure_vocab_size(model, len(tok.vocab))   # deterministic EOT-copy rows
+    print(f"tokenizer: {tok_path} | vocab {len(tok.vocab)} "
+          f"| chat {'on' if '<|assistant|>' in tok.special_tokens else 'off'}")
 
     if args.chat:
         chat_loop(model, tok, device, args)

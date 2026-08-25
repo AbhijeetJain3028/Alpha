@@ -17,7 +17,15 @@ INPUT = os.environ.get("INDUS_INPUT", "/kaggle/input")
 WORK = os.environ.get("INDUS_WORK", "/kaggle/working")
 os.makedirs(WORK, exist_ok=True)
 
-HF_TOKEN = "__HF_TOKEN__"
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if not HF_TOKEN:
+    try:
+        from kaggle_secrets import UserSecretsClient
+        HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN")
+    except Exception:
+        HF_TOKEN = ""
+if not HF_TOKEN:
+    HF_TOKEN = "__HF_TOKEN__"      # legacy path (replaced by kaggle_run.py)
 HF_REPO_ID = "__HF_REPO_ID__"
 STEPS = int("__SFT_STEPS__")
 BATCH_SIZE = int("__SFT_BATCH__")
@@ -49,6 +57,8 @@ else:
                            token=HF_TOKEN)
 print("[load] base:", base)
 
+os.environ["HF_TOKEN"] = HF_TOKEN     # train_sft auto-upload reads env
+
 sys.argv = ["train_sft.py",
             "--base-ckpt", base,
             "--tokenizer", os.path.join(data_dir, "tokenizer.json"),
@@ -58,4 +68,5 @@ sys.argv = ["train_sft.py",
             "--steps", str(STEPS),
             "--batch-size", str(BATCH_SIZE)]
 
+import train_sft          # ships inside the indus-data dataset
 train_sft.main()

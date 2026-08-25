@@ -24,9 +24,16 @@ class IndusConfig:
     dropout: float = 0.0            # dropout on attn output + mlp output
     weight_decay: float = 0.1
 
+    # mixture-of-experts (dormant unless use_moe; needs fresh pretrain)
+    use_moe: bool = False
+    n_experts: int = 8              # total SwiGLU experts per block
+    n_experts_active: int = 2       # top-k routing (k)
+
     def __post_init__(self):
         assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"
         assert self.n_head % self.n_kv_head == 0, "n_head must be divisible by n_kv_head"
+        assert 1 <= self.n_experts_active <= self.n_experts, \
+            "need 1 <= n_experts_active <= n_experts"
 
     @property
     def head_dim(self) -> int:

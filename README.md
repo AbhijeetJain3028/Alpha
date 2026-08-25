@@ -148,6 +148,60 @@ python scripts/evaluate.py                    # WikiText PPL + LAMBADA + ARC-Eas
 
 The research grounding every design decision lives in [docs/PAPERS.md](docs/PAPERS.md).
 
+## Autonomy — research the web, learn, answer with citations
+
+Indus can autonomously research a topic, remember it in a retrieval memory,
+fine-tune on what it found (eval-gated with replay-buffer rollback so it
+never forgets its base skills), and answer grounded questions with citations:
+
+```bash
+# one-shot cycles
+python scripts/auto_learn.py --topics "Eiffel Tower,Photosynthesis"
+
+# interactive
+python scripts/auto_learn.py
+```
+
+In the web UI, hit `POST /api/research {"session_id": "...", "topic": "..."}`
+(SSE streams sources → learning stats → grounded answer), or send any chat
+message with `"research": true` to answer from the knowledge store.
+Design doctrine lives in [docs/PLAYBOOK.md](docs/PLAYBOOK.md):
+knowledge lives outside the network (FTS5 BM25 retriever); the tiny model
+shapes queries and composes grounded answers; self-training rolls back
+unless held-out perplexity improves.
+
+## Indus-Kernel integration
+
+Selected, peak-value ports from the [Indus-Kernel](https://github.com/Abhijeetjain4075/Indus-Kernel)
+control plane (the full 40-subsystem stack can drive Indus through the bridge):
+
+| Port | File | Purpose |
+|---|---|---|
+| Auditable research contract | `indus/research_contract.py` | provenance-tied claims; refuses without evidence |
+| Sparse MoE-SwiGLU | `indus/moe.py` + `config.use_moe` | dormant expert routing for the next pretrain |
+| Constitutional scaffold | `indus/constitution.py` | principles prefix + deterministic PII/harm lint + regenerate |
+| stdio tool server (A2A/MCP-style) | `scripts/indus_mcp_server.py` | lets any agent/kernel call `chat`/`research`/`answer`/`info` |
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python scripts/indus_mcp_server.py
+```
+
+## GPU fine-tuning (chat) on Kaggle
+
+```bash
+export KAGGLE_API_TOKEN=... HF_TOKEN=...
+python scripts/kaggle_run.py dataset      # ships corpus + SFT corpus + code
+python scripts/kaggle_run.py push-sft     # T4 run -> ckpt-sft.pt to the Hub
+python scripts/kaggle_run.py watch --kernel indus-sft
+python scripts/kaggle_run.py status --kernel indus-sft
+```
+
+The training kernel early-stops on validation patience and always keeps the
+val-best weights (`ckpt-best.pt`); uploads are content-hash deduped; the HF
+token resolves env-var → Kaggle Secret → placeholder (never required in
+kernel source). Full doctrine: [docs/PLAYBOOK.md](docs/PLAYBOOK.md),
+paper-by-paper grounding: [docs/PAPERS.md](docs/PAPERS.md).
+
 ## Notes
 
 - The tokenizer is intentionally simple/pure-Python; for multi-GB corpora swap

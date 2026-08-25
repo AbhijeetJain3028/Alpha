@@ -28,7 +28,17 @@ import numpy as np
 import torch
 
 # ---------------------------------------------------------------- injected cfg
-HF_TOKEN = "__HF_TOKEN__"
+# Token resolution order: env var -> Kaggle Secrets -> push-time placeholder.
+# The token never has to live in the notebook source anymore.
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if not HF_TOKEN:
+    try:
+        from kaggle_secrets import UserSecretsClient
+        HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN")
+    except Exception:
+        HF_TOKEN = ""
+if not HF_TOKEN:
+    HF_TOKEN = "__HF_TOKEN__"      # legacy path (replaced by kaggle_run.py)
 HF_REPO_ID = "__HF_REPO_ID__"
 PRESET = "__PRESET__"
 MAX_STEPS = int("__MAX_STEPS__")            # total optimizer steps across ALL runs
@@ -37,6 +47,7 @@ TIME_BUDGET_MIN = float("__TIME_BUDGET_MIN__")   # stop safely before session ki
 SAVE_EVERY_STEPS = int("__SAVE_EVERY_STEPS__")
 EVAL_EVERY = int("__EVAL_EVERY__")
 NUMBERED_EVERY = int("__NUMBERED_EVERY__")   # keep a permanent numbered ckpt
+PATIENCE = int("__PATIENCE__")   # stop after this many evals w/o improvement
 SEED = 1337
 
 WORK = os.environ.get("INDUS_WORK", "/kaggle/working")
@@ -84,11 +95,20 @@ INTERNET = bool(HF_TOKEN)
 def hub_upload(path: str, path_in_repo: str, msg: str) -> bool:
     if not INTERNET:
         return False
+    # dedup: never re-upload byte-identical files (fixes duplicate commits)
+    import hashlib
+    h = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    sig = os.path.join(WORK, f".uploaded_{path_in_repo.replace('/', '_')}")
+    if os.path.exists(sig) and open(sig).read().strip() == h:
+        print(f"[hub ] skip {path_in_repo} (identical to last upload)")
+        return True
     for attempt in range(3):
         try:
             hub.upload_file(path_or_fileobj=path, path_in_repo=path_in_repo,
                             repo_id=HF_REPO_ID, repo_type="model",
                             commit_message=msg)
+            with open(sig, "w") as f:
+                f.write(h)
             print(f"[hub ] uploaded {path_in_repo}")
             return True
         except Exception as e:
@@ -158,7 +178,8 @@ model = model.to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4,
                               betas=(0.9, 0.95), eps=1e-8,
-                              weight_decay=cfg.weight_decay)
+                              weight_decay=cfg.weight_decay,
+                              fused=(device == "cuda"))
 if best is not None and best.get("optimizer"):
     optimizer.load_state_dict(best["optimizer"])
 if best is not None and best.get("rng"):
@@ -253,6 +274,7 @@ signal.signal(signal.SIGINT, _graceful)
 t0 = time.time()
 deadline = t0 + TIME_BUDGET_MIN * 60
 best_val = float(globals().get("best_val", float("inf")))
+patience_left = PATIENCE
 log_every = 25
 
 model.train()
@@ -296,8 +318,20 @@ for step in range(start_step, MAX_STEPS):
 
     if step > 0 and step % EVAL_EVERY == 0:
         vl = run_eval()
-        best_val = min(best_val, vl)
-        print(f"[eval ] iter {step}: val_loss {vl:.4f} (best {best_val:.4f})")
+        if vl < best_val:
+            best_val = vl
+            patience_left = PATIENCE
+            print(f"[eval ] iter {step}: val_loss {vl:.4f} "
+                  f"(NEW BEST) -> saving ckpt-best.pt")
+            save_checkpoint(step + 1, "ckpt-best.pt")
+        else:
+            patience_left -= 1
+            print(f"[eval ] iter {step}: val_loss {vl:.4f} "
+                  f"(best {best_val:.4f}, patience left {patience_left})")
+            if patience_left <= 0:
+                print(f"[early-stop] no val improvement for {PATIENCE} "
+                      f"evals - stopping to avoid overfitting")
+                break
 
     if (step + 1) % SAVE_EVERY_STEPS == 0 or step == MAX_STEPS - 1:
         save_checkpoint(step + 1, "ckpt-latest.pt")

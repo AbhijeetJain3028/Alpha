@@ -22,7 +22,9 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from indus.config import IndusConfig              # noqa: E402
-from indus.model import IndusLM                   # noqa: E402
+from indus.autonomous import (KnowledgeStore, SelfLearner, WebCorpus,  # noqa: E402
+                              answer_grounded, grounded_prompt)
+from indus.model import IndusLM, ensure_vocab_size  # noqa: E402
 from indus.tokenizer import BPETokenizer          # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +42,9 @@ class ModelManager:
         self.ckpt_name = "?"
         self.kind = "unloaded"
         self.device = "cpu"
+        self.corpus: WebCorpus | None = None
+        self.store: KnowledgeStore | None = None
+        self.learner: SelfLearner | None = None
 
     def tokenizer(self):
         if self.tok is None:
@@ -50,6 +55,20 @@ class ModelManager:
             assert self.tok, "tokenizer.json not found"
         self.tok.add_chat_specials()   # idempotent
         return self.tok
+
+    def autonomy(self):
+        """Lazily create the research corpus + knowledge store + learner."""
+        if self.corpus is None:
+            self.corpus = WebCorpus()
+        if self.store is None:
+            self.store = KnowledgeStore(os.path.join(
+                ROOT, "knowledge", "knowledge.db"))
+        if self.learner is None and self.model is not None:
+            replay = os.path.join(ROOT, "data", "train.bin")
+            self.learner = SelfLearner(
+                self.model, self.tokenizer(), device=self.device,
+                replay_bin=replay if os.path.exists(replay) else None)
+        return self.corpus, self.store, self.learner
 
     def load(self, ckpt_path=None, which="ckpt-latest.pt", device=None):
         if ckpt_path is None:
@@ -73,8 +92,11 @@ class ModelManager:
                      if k in model.state_dict()
                      and model.state_dict()[k].shape == v.shape}
             model.load_state_dict(final, strict=False)
+            ensure_vocab_size(model, max(cfg.vocab_size,
+                                         model.tok_emb.weight.shape[0]))
             self.model, self.cfg = model, cfg
             self.kind = ckpt.get("kind", "pretrained")
+            self.learner = None          # rebind learner to fresh weights
         return True
 
 
@@ -88,6 +110,15 @@ class ChatRequest(BaseModel):
     top_k: int = 50
     max_tokens: int = 256
     system: str | None = None
+    research: bool = False        # retrieval-grounded answering
+
+
+class ResearchRequest(BaseModel):
+    session_id: str
+    topic: str
+    train: bool = True            # also fine-tune on what was found
+    steps: int = 60
+    max_pages: int = 3
 
 
 SESSIONS: dict[str, dict] = {}
@@ -142,6 +173,8 @@ def info():
     return {
         "name": MM.cfg.name,
         "params_M": round(MM.model.num_params() / 1e6, 1),
+        "params_total_M":
+            round(MM.model.num_params(non_embedding=False) / 1e6, 2),
         "checkpoint": MM.ckpt_name,
         "kind": MM.kind,
         "vocab_size": MM.cfg.vocab_size,
@@ -149,6 +182,7 @@ def info():
         "device": MM.device,
         "chat_ready": "<|assistant|>" in MM.tokenizer().special_tokens
                       and MM.cfg.vocab_size >= len(MM.tokenizer().vocab),
+        "knowledge_docs": (MM.store.count() if MM.store else None),
     }
 
 
@@ -183,7 +217,16 @@ def chat(req: ChatRequest):
             eot = tok.special_tokens.get("<|endoftext|>")
             end = tok.special_tokens.get("<|end|>")
             specials = set(tok.special_tokens.values())
-            ids = build_prompt(sess, req.message)
+            if req.research:
+                _, store, _ = MM.autonomy()
+                hits = store.search(req.message, k=3) \
+                    if store.count() else []
+                ids = tok.encode_with_specials(
+                    grounded_prompt(tok, req.message, hits))[
+                        -MM.cfg.block_size:] if hits else \
+                    build_prompt(sess, req.message)
+            else:
+                ids = build_prompt(sess, req.message)
             x = torch.tensor([ids], device=MM.device)
             reply_chunks = []
             t0 = time.time()
@@ -228,6 +271,87 @@ def chat(req: ChatRequest):
 
 def sse(obj) -> str:
     return f"data: {json.dumps(obj)}\n\n"
+
+
+@app.post("/api/research")
+def research(req: ResearchRequest):
+    """Full autonomy cycle: web research -> knowledge store -> eval-gated
+    self-training -> grounded answer, streamed as SSE."""
+    if MM.model is None:
+        info()
+    sess = SESSIONS.setdefault(req.session_id,
+                               {"history": "", "turns": 0, "system": ""})
+
+    def gen():
+        with MM.lock:
+            tok = MM.tokenizer()
+            corpus, store, learner = MM.autonomy()
+            yield sse({"t": "status", "v": f"researching '{req.topic}' ..."})
+            docs = []
+            try:
+                corpus.max_pages = req.max_pages
+                docs = corpus.gather(req.topic)
+            except Exception as e:
+                yield sse({"t": "status", "v": f"research error: {e}"})
+            for d in docs:
+                store.add(d)
+            titles = [f"{d['title']} ({d['source'].split(':')[0]})"
+                      for d in docs]
+            yield sse({"t": "sources", "v": titles})
+            if not docs:
+                yield sse({"t": "done", "rate": 0, "tokens": 0})
+                return
+
+            if req.train and learner is not None:
+                yield sse({"t": "status",
+                           "v": f"learning from {len(docs)} sources "
+                                f"({req.steps} steps, eval-gated) ..."})
+                try:
+                    res = learner.learn(docs, steps=req.steps)
+                    yield sse({"t": "learn", "v": json.dumps(res)})
+                except Exception as e:
+                    yield sse({"t": "status", "v": f"learn error: {e}"})
+
+            hits = store.search(req.topic, k=3)
+            question = f"What is {req.topic}?"
+            prompt_ids = tok.encode_with_specials(
+                grounded_prompt(tok, question, hits))[-MM.cfg.block_size:]
+            x = torch.tensor([prompt_ids], device=MM.device)
+            eot = tok.special_tokens.get("<|endoftext|>")
+            end = tok.special_tokens.get("<|end|>")
+            specials = set(tok.special_tokens.values())
+            reply_chunks = []
+            n_new = 0
+            t0 = time.time()
+            yield sse({"t": "status", "v": "answering with sources ..."})
+            yield sse({"t": "tok", "v": ""})     # flush
+            for _ in range(min(110, MM.cfg.block_size)):
+                logits = MM.model(x[:, -MM.cfg.block_size:]).logits[0, -1]
+                lg = logits / max(0.5, 1e-6)
+                k = min(50, lg.size(-1))
+                lg = lg.masked_fill(
+                    lg < torch.topk(lg, k).values[-1], float("-inf"))
+                nxt = int(torch.multinomial(torch.softmax(lg, -1), 1))
+                if nxt in (eot, end):
+                    break
+                n_new += 1
+                if nxt not in specials:
+                    piece = tok.vocab[nxt].decode("utf-8", errors="replace")
+                    reply_chunks.append(piece)
+                    yield sse({"t": "tok", "v": piece})
+                x = torch.cat([x, torch.tensor([[nxt]], device=MM.device)],
+                              dim=1)
+            reply = "".join(reply_chunks).strip()
+            rate = n_new / max(time.time() - t0, 1e-6)
+            sess["history"] += (f"<|user|>\n{question}<|end|>\n"
+                                f"<|assistant|>\n{reply}<|end|>\n")
+            sess["turns"] += 1
+            yield sse({"t": "done", "rate": round(rate, 1),
+                       "tokens": n_new})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 class FeedbackReq(BaseModel):

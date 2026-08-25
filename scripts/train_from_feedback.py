@@ -26,7 +26,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from indus.config import IndusConfig                 # noqa: E402
-from indus.model import IndusLM                      # noqa: E402
+from indus.model import IndusLM, ensure_vocab_size   # noqa: E402
 from indus.tokenizer import BPETokenizer             # noqa: E402
 
 FEEDBACK_PATH = os.path.join("data_feedback", "feedback.jsonl")
@@ -131,6 +131,9 @@ def main() -> None:
     final = {k: v for k, v in state.items()
              if k in model.state_dict() and model.state_dict()[k].shape == v.shape}
     model.load_state_dict(final, strict=False)
+    # grow embeddings deterministically (copy EOT row) - pretrained rows
+    # survive; random new-row init poisons generation
+    ensure_vocab_size(model, cfg.vocab_size)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   betas=(0.9, 0.95), weight_decay=0.01)

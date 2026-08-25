@@ -85,6 +85,35 @@ component. Each entry states exactly what Indus takes from it.
 - **lm-evaluation-harness**: task definitions informed Indus's compact evaluator
   (`scripts/evaluate.py` reimplements LAMBADA + ARC-Easy scoring from scratch).
 
+## 8. Autonomy engine (`indus/autonomous.py`, `scripts/auto_learn.py`)
+
+| Paper | Venue | What Indus uses |
+|---|---|---|
+| **REALM: Retrieval-Augmented LM** — Guu et al., 2020 ([arXiv:2002.08909](https://arxiv.org/abs/2002.08909)) | ICML | Doctrine: knowledge lives in a retriever, not the network |
+| **RAG** — Lewis et al., 2020 ([arXiv:2005.11401](https://arxiv.org/abs/2005.11401)) | NeurIPS | Grounded generation from retrieved passages |
+| **RA-DIT** — Izacard et al., 2022 ([arXiv:2212.10517](https://arxiv.org/abs/2212.10517)) | — | Retro-fit LM via retrieval-grounded fine-tuning |
+| **Toolformer** — Schick et al., 2023 ([arXiv:2302.04761](https://arxiv.org/abs/2302.04761)) | NeurIPS | Scaffold-shaped tool calls; degraded-but-deterministic at tiny scale |
+| **STaR** — Zelikman et al., 2022 ([arXiv:2203.14465](https://arxiv.org/abs/2203.14465)) | NeurIPS | Keep-only-winners self-training loop |
+| **Self-RAG** — Asai et al., 2023 ([arXiv:2310.11511](https://arxiv.org/abs/2310.11511)) | ICLR | Critique-gated retrieval tokens → our citation linting |
+| **WebGPT** — Nakano et al., 2021 ([arXiv:2112.09332](https://arxiv.org/abs/2112.09332)) | — | Search-augmented QA with source citations |
+| **Search-R1** — Jin et al., 2025 ([arXiv:2503.09516](https://arxiv.org/abs/2503.09516)) | — | Evidence that RL search policy needs ≥3B → tiny models use scaffolded search instead |
+| **EWC** — Kirkpatrick et al., 2017 ([arXiv:1612.00796](https://arxiv.org/abs/1612.00796)) | PNAS | Catastrophic-forgetting defense → our eval-gate + replay-buffer rollback |
+
+## 9. Kernel integrations (from Indus-Kernel `ik_*`)
+
+| Source | What was ported | Where it lives now |
+|---|---|---|
+| `ik_research` provenance contract | ResearchTask/Source/Claim/Result; never invent sources; refuse without evidence | `indus/research_contract.py` |
+| `ik_indus_llm/moe.py` | Sparse MoE-SwiGLU experts + load-balancing aux loss (k/E-shrunk for FLOP parity) | `indus/moe.py` + `config.use_moe` (dormant until next pretrain) |
+| `ik_indus_llm/constitution.py` | Generation-time constitution: principles prefix + deterministic PII/harm lint + single low-temp regenerate | `indus/constitution.py` |
+| A2A/MCP ABI | stdio JSON-RPC tool server (`chat`/`research`/`answer`/`info`) so all 40 kernel subsystems can drive Indus | `scripts/indus_mcp_server.py` |
+
+Supporting papers: **Constitutional AI** — Bai et al., 2022 ([arXiv:2212.08073](https://arxiv.org/abs/2212.08073)); **MoE** — Shazeer et al., 2017 ([arXiv:1701.06538](https://arxiv.org/abs/1701.06538)); **Switch Transformer** — Fedus et al., 2022 ([arXiv:2101.03961](https://arxiv.org/abs/2101.03961)); **DeepSeekMoE** — Dai et al., 2024 ([arXiv:2401.06066](https://arxiv.org/abs/2401.06066)).
+
+## 10. Efficiency roadmap (from the 2026 playbook sweep)
+
+MobileLLM deep-narrow sizing ([arXiv:2402.14905](https://arxiv.org/abs/2402.14905)) · WSD schedule with high-quality cooldown / MiniCPM ([arXiv:2404.06395](https://arxiv.org/abs/2404.06395)) · Muon optimizer (Jordan 2024; Kimi K2 [arXiv:2507.20534](https://arxiv.org/abs/2507.20534)) · Model Soups ([arXiv:2203.05482](https://arxiv.org/abs/2203.05482)) · multi-token prediction ([arXiv:2404.19737](https://arxiv.org/abs/2404.19737)). Full strategy detail: [PLAYBOOK.md](PLAYBOOK.md).
+
 ## Mapping summary
 
 ```
@@ -102,3 +131,10 @@ train.py:cosine     ← SGDR'16
 data.py             ← nanoGPT, Kaplan'20
 presets/tokens      ← Chinchilla'22, TinyStories'23
 whole arch          ← Vaswani'17 decoder + Xiong'20 pre-norm + LLaMA'23
+autonomous.py       ← REALM/RAG/RA-DIT + Toolformer + STaR/Self-RAG +
+                      WebGPT/Search-R1 + EWC (replay+gate)
+moe.py              ← Shazeer'17 / Switch'22 / DeepSeekMoE'24
+constitution.py     ← Bai'22 Constitutional AI
+research_contract   ← ik_research provenance doctrine
+indus_mcp_server    ← A2A v1.0 / MCP ABI bridge
+```

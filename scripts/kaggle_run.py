@@ -65,6 +65,14 @@ def cmd_dataset(args) -> None:
     # corpus + tokenizer
     for name in ("train.bin", "val.bin", "tokenizer.json"):
         shutil.copy2(data_dir / name, folder / name)
+    # SFT corpus (masked chat data) when it has been built
+    sft_dir = ROOT / "data_sft"
+    if (sft_dir / "sft_train.bin").exists():
+        for name in ("sft_train.bin", "sft_train.mask.bin",
+                     "sft_val.bin", "sft_val.mask.bin"):
+            if (sft_dir / name).exists():
+                shutil.copy2(sft_dir / name, folder / name)
+        print("[kaggle] including SFT corpus in dataset")
     # the model package itself ships with the data
     for f in (ROOT / "indus").glob("*.py"):
         shutil.copy2(f, folder / "indus" / f.name)
@@ -93,13 +101,13 @@ def cmd_dataset(args) -> None:
 
 # ------------------------------------------------------------------------ kernel
 def render_kernel(args) -> Path:
-    if not args.hf_token or not args.hf_repo:
-        raise SystemExit("--hf-token/--hf-repo required (or set HF_TOKEN/HF_REPO)")
+    if not args.hf_repo:
+        raise SystemExit("--hf-repo required (or set HF_REPO)")
     folder = BUILD / KERNEL_SLUG
     folder.mkdir(parents=True, exist_ok=True)
 
     src = KERNEL_TEMPLATE.read_text()
-    src = src.replace("__HF_TOKEN__", args.hf_token)
+    src = src.replace("__HF_TOKEN__", args.hf_token or "__HF_TOKEN__")
     src = src.replace("__HF_REPO_ID__", args.hf_repo)
     src = src.replace("__PRESET__", args.preset)
     src = src.replace("__MAX_STEPS__", str(args.max_steps))
@@ -108,6 +116,7 @@ def render_kernel(args) -> Path:
     src = src.replace("__SAVE_EVERY_STEPS__", str(args.save_every_steps))
     src = src.replace("__EVAL_EVERY__", str(args.eval_every))
     src = src.replace("__NUMBERED_EVERY__", str(args.numbered_every))
+    src = src.replace("__PATIENCE__", str(args.patience))
 
     script = folder / "indus_train_kernel.py"
     script.write_text(src)
@@ -140,19 +149,65 @@ def cmd_push(args) -> None:
     print(f"monitor: https://www.kaggle.com/{KAGGLE_USER}/{KERNEL_SLUG}")
 
 
-def cmd_status(_args) -> None:
+# ------------------------------------------------------------------- sft kernel
+SFT_TEMPLATE = ROOT / "scripts" / "kernel_indus_sft.py"
+SFT_SLUG = "indus-sft"
+
+
+def render_sft_kernel(args) -> Path:
+    if not args.hf_repo:
+        raise SystemExit("--hf-repo required (or set HF_REPO)")
+    folder = BUILD / SFT_SLUG
+    folder.mkdir(parents=True, exist_ok=True)
+    src = SFT_TEMPLATE.read_text()
+    src = src.replace("__HF_TOKEN__", args.hf_token or "__HF_TOKEN__")
+    src = src.replace("__HF_REPO_ID__", args.hf_repo)
+    src = src.replace("__SFT_STEPS__", str(args.sft_steps))
+    src = src.replace("__SFT_BATCH__", str(args.sft_batch))
+    script = folder / "indus_sft_kernel.py"
+    script.write_text(src)
+    meta = {
+        "id": f"{KAGGLE_USER}/{SFT_SLUG}",
+        "title": "indus-sft",
+        "code_file": "indus_sft_kernel.py",
+        "language": "python",
+        "kernel_type": "script",
+        "is_private": "true",
+        "enable_gpu": "false",
+        "enable_internet": "true" if not args.no_internet else "false",
+        "machine_shape": args.accelerator,
+        "dataset_sources": [f"{KAGGLE_USER}/{DATA_SLUG}"],
+        "competition_sources": [],
+        "kernel_sources": [],
+        "model_sources": [],
+    }
+    (folder / "kernel-metadata.json").write_text(json.dumps(meta, indent=2))
+    return folder
+
+
+def cmd_push_sft(args) -> None:
     api = load_api()
-    st = api.kernels_status(f"{KAGGLE_USER}/{KERNEL_SLUG}")
+    folder = render_sft_kernel(args)
+    res = api.kernels_push(folder=str(folder), acc=args.accelerator)
+    print("[kaggle] pushed SFT:", getattr(res, "url", res))
+    print(f"monitor: https://www.kaggle.com/{KAGGLE_USER}/{SFT_SLUG}")
+
+
+def cmd_status(args) -> None:
+    api = load_api()
+    slug = args.kernel or KERNEL_SLUG
+    st = api.kernels_status(f"{KAGGLE_USER}/{slug}")
     print(json.dumps(st, indent=2, default=str))
 
 
 def cmd_watch(args) -> None:
     api = load_api()
+    slug = args.kernel or KERNEL_SLUG
     terminal = {"COMPLETE", "ERROR", "CANCEL_ACKNOWLEDGED"}
     while True:
-        st = api.kernels_status(f"{KAGGLE_USER}/{KERNEL_SLUG}")
+        st = api.kernels_status(f"{KAGGLE_USER}/{slug}")
         status = st.get("status", "?") if isinstance(st, dict) else str(st)
-        print(time.strftime("[%H:%M:%S]"), status, flush=True)
+        print(time.strftime("[%H:%M:%S]"), slug, status, flush=True)
         if str(status).upper() in terminal:
             break
         time.sleep(max(30, args.interval))
@@ -161,9 +216,10 @@ def cmd_watch(args) -> None:
 
 def cmd_output(args) -> None:
     api = load_api()
-    out = Path(args.out_dir or (ROOT / "kaggle" / "output"))
+    slug = args.kernel or KERNEL_SLUG
+    out = Path(args.out_dir or (ROOT / "kaggle" / "output" / slug))
     out.mkdir(parents=True, exist_ok=True)
-    files, token = api.kernels_output(f"{KAGGLE_USER}/{KERNEL_SLUG}",
+    files, token = api.kernels_output(f"{KAGGLE_USER}/{slug}",
                                       path=str(out), quiet=False)
     print("downloaded:", files)
 
@@ -187,24 +243,45 @@ def main() -> None:
     p.add_argument("--save-every-steps", type=int, default=500)
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--numbered-every", type=int, default=2000)
+    p.add_argument("--patience", type=int, default=4,
+                   help="stop after this many evals without val improvement")
     p.add_argument("--no-internet", action="store_true")
     p.add_argument("--accelerator", default="NvidiaTeslaT4",
                    choices=["NvidiaTeslaT4", "NvidiaTeslaP100"])
     p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
-                   help="defaults to $HF_TOKEN")
+                   help="optional - kernel prefers $HF_TOKEN env or the "
+                        "HF_TOKEN Kaggle Secret over this")
     p.add_argument("--hf-repo", default=os.environ.get("HF_REPO",
                    "AbhijeetJain4075/indus-llm"))
     p.set_defaults(fn=cmd_push)
 
+    ps = sub.add_parser("push-sft",
+                        help="launch the chat fine-tuning kernel on GPU")
+    ps.add_argument("--sft-steps", type=int, default=2000)
+    ps.add_argument("--sft-batch", type=int, default=16)
+    ps.add_argument("--no-internet", action="store_true")
+    ps.add_argument("--accelerator", default="NvidiaTeslaT4",
+                    choices=["NvidiaTeslaT4", "NvidiaTeslaP100"])
+    ps.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"))
+    ps.add_argument("--hf-repo", default=os.environ.get("HF_REPO",
+                    "AbhijeetJain4075/indus-llm"))
+    ps.set_defaults(fn=cmd_push_sft)
+
     p = sub.add_parser("status")
+    p.add_argument("--kernel", default=None,
+                   help="indus-train (default) or indus-sft")
     p.set_defaults(fn=cmd_status)
 
     p = sub.add_parser("watch")
+    p.add_argument("--kernel", default=None,
+                   help="indus-train (default) or indus-sft")
     p.add_argument("--interval", type=float, default=60)
     p.add_argument("--out-dir", default=None)
     p.set_defaults(fn=cmd_watch)
 
     p = sub.add_parser("output")
+    p.add_argument("--kernel", default=None,
+                   help="indus-train (default) or indus-sft")
     p.add_argument("--out-dir", default=None)
     p.set_defaults(fn=cmd_output)
 

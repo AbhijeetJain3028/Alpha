@@ -27,21 +27,36 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from indus.tokenizer import BPETokenizer  # noqa: E402
 
 OASST_URL = ("https://huggingface.co/datasets/OpenAssistant/oasst1/resolve/main/"
-             "2023-04-12_oasst1_all.jsonl.gz")
+             "2023-04-12_oasst_all.messages.jsonl.gz")
 DOLLY_URL = ("https://huggingface.co/datasets/databricks/databricks-dolly-15k/"
              "resolve/main/databricks-dolly-15k.jsonl")
 SMOLTALK_DIR = ("https://huggingface.co/datasets/HuggingFaceTB/smoltalk/"
-                "resolve/main/everyday-conversations")
+                "resolve/main/data/everyday-conversations")
 
 
-def _dl_bytes(url: str, dest: str) -> None:
+def _dl_bytes(url: str, dest: str) -> bool:
     print(f"[get ] {url.rsplit('/', 1)[-1]}")
     tmp = dest + ".part"
-    urllib.request.urlretrieve(url, tmp)
+    try:
+        urllib.request.urlretrieve(url, tmp)
+    except Exception as e:
+        print(f"[warn] download failed, skipping source: {e}")
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return False
     os.replace(tmp, dest)
+    return True
 
 
 # ------------------------------------------------------------------- oasst1
+def _label_value(m: dict, name: str, default=0):
+    lab = m.get("labels") or {}
+    v = lab.get(name)
+    if isinstance(v, dict):
+        return v.get("value", default)
+    return v if v is not None else default
+
+
 def oasst1_conversations(path: str, max_conv: int) -> list[list[dict]]:
     msgs = {}
     with gzip.open(path, "rt", encoding="utf-8") as f:
@@ -60,6 +75,9 @@ def oasst1_conversations(path: str, max_conv: int) -> list[list[dict]]:
         elif p in msgs:
             kids.setdefault(p, []).append(m)
 
+    def role_of(m):
+        return "assistant" if m.get("role") == "assistant" else "user"
+
     convos = []
     for root in roots:
         seq = [root]
@@ -67,11 +85,12 @@ def oasst1_conversations(path: str, max_conv: int) -> list[list[dict]]:
         while len(kids.get(cur["message_id"], [])) > 0 and len(seq) < 8:
             children = kids[cur["message_id"]]
             if cur["role"] == "assistant":
-                nxt = min((c for c in children if c.get("rank") is not None),
+                nxt = min((c for c in children
+                           if c.get("rank") is not None),
                           key=lambda c: c["rank"], default=None)
             else:
                 nxt = max(children,
-                          key=lambda c: c.get("labels", {}).get("quality", 0),
+                          key=lambda c: float(_label_value(c, "quality")),
                           default=None)
             if nxt is None:
                 break
@@ -79,7 +98,8 @@ def oasst1_conversations(path: str, max_conv: int) -> list[list[dict]]:
             cur = nxt
         # must end on an assistant turn to be a usable example
         if len(seq) >= 2 and seq[-1]["role"] == "assistant":
-            convos.append([{"role": m["role"], "content": m["text"]} for m in seq])
+            convos.append([{"role": role_of(m), "content": m["text"]}
+                           for m in seq])
         if len(convos) >= max_conv:
             break
     return convos
@@ -144,25 +164,33 @@ def main() -> None:
     os.makedirs("corpus", exist_ok=True)
 
     oasst_gz = "corpus/oasst1_all.jsonl.gz"
-    if not os.path.exists(oasst_gz):
+    have_oasst = os.path.exists(oasst_gz) or \
         _dl_bytes(OASST_URL, oasst_gz)
     dolly_jsonl = "corpus/dolly15k.jsonl"
-    if not os.path.exists(dolly_jsonl):
+    have_dolly = os.path.exists(dolly_jsonl) or \
         _dl_bytes(DOLLY_URL, dolly_jsonl)
     st_dir = os.path.join("corpus", "smoltalk_everyday")
     if not os.path.exists(st_dir):
         os.makedirs(st_dir, exist_ok=True)
         for name in ["train-00000-of-00001.parquet"]:
             _dl_bytes(f"{SMOLTALK_DIR}/{name}", os.path.join(st_dir, name))
+    have_st = any(f.endswith(".parquet") and
+                  os.path.getsize(os.path.join(st_dir, f)) > 0
+                  for f in os.listdir(st_dir)) if os.path.isdir(st_dir) else False
 
     print("[data] extracting conversations ...")
     convos = []
-    convos += [("oasst1", c) for c in
-               oasst1_conversations(oasst_gz, args.max_oasst)]
-    convos += [("dolly", c) for c in
-               dolly_conversations(dolly_jsonl, args.max_dolly)]
-    convos += [("smoltalk", c) for c in
-               smoltalk_conversations(st_dir, args.max_smoltalk)]
+    if have_oasst:
+        convos += [("oasst1", c) for c in
+                   oasst1_conversations(oasst_gz, args.max_oasst)]
+    if have_dolly:
+        convos += [("dolly", c) for c in
+                   dolly_conversations(dolly_jsonl, args.max_dolly)]
+    if have_st:
+        convos += [("smoltalk", c) for c in
+                   smoltalk_conversations(st_dir, args.max_smoltalk)]
+    if not convos:
+        raise SystemExit("no SFT sources available - all downloads failed")
     from collections import Counter
     print("  source counts:", dict(Counter(s for s, _ in convos)),
           "| total:", len(convos))

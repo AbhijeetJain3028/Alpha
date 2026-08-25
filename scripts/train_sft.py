@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from indus.config import IndusConfig                 # noqa: E402
 from indus.data import SFTDataset, get_sft_batch     # noqa: E402
-from indus.model import IndusLM                      # noqa: E402
+from indus.model import IndusLM, ensure_vocab_size   # noqa: E402
 from indus.tokenizer import BPETokenizer             # noqa: E402
 
 
@@ -35,7 +35,9 @@ def load_base(ckpt_path: str):
 
 
 def resize_for_vocab(model: IndusLM, old_state: dict, new_vocab: int) -> None:
-    """Copy matching weights; keep fresh random init for new token rows."""
+    """Load every matching tensor (model must be built at the ckpt's NATIVE
+    vocab so nothing is filtered), then grow embeddings deterministically
+    (new rows copy <|endoftext|>) - never random."""
     state = model.state_dict()
     loaded = 0
     for k, v in old_state.items():
@@ -44,8 +46,10 @@ def resize_for_vocab(model: IndusLM, old_state: dict, new_vocab: int) -> None:
         state[k] = v
         loaded += 1
     model.load_state_dict(state)
+    grew = ensure_vocab_size(model, new_vocab)
     print(f"[init] loaded {loaded}/{len(state)} tensors "
-          f"(embedding resized {old_state['tok_emb.weight'].shape[0]} -> {new_vocab})")
+          f"(embedding {'grown' if grew else 'kept'} -> "
+          f"{model.tok_emb.weight.shape[0]} rows, pretrained preserved)")
 
 
 @torch.no_grad()
@@ -85,15 +89,19 @@ def main() -> None:
 
     tok = BPETokenizer.load(args.tokenizer)
     tok.add_chat_specials()
-    tok.save(args.tokenizer)
+    try:
+        tok.save(args.tokenizer)      # persist specials when writable
+    except OSError:
+        print("[tok ] read-only mount - specials kept in memory only")
 
     cfg, base = load_base(args.base_ckpt)
-    cfg.vocab_size = len(tok.vocab)               # grow for chat specials
     device = args.device
 
+    # build at the ckpt's NATIVE vocab so every pretrained tensor loads,
+    # then grow deterministically for chat specials
     model = IndusLM(cfg).to(device)
     resize_for_vocab(model, {k: v.cpu() for k, v in base["model"].items()},
-                     cfg.vocab_size)
+                     max(cfg.vocab_size, len(tok.vocab)))
     del base
 
     train_ds = SFTDataset(os.path.join(args.data_dir, "sft_train.bin"))

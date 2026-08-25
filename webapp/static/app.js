@@ -6,6 +6,7 @@ const state = {
   current: localStorage.getItem("indus.current") || null,
   temp: 0.7, topk: 50, maxtok: 256, system: "",
   busy: false,
+  research: false,
 };
 localStorage.setItem("indus.sid", state.sid);
 
@@ -130,6 +131,76 @@ function scrollDown() {
   sc.scrollTop = sc.scrollHeight;
 }
 
+/* ───────────────────── autonomous research mode ────────────────── */
+$("research-toggle").addEventListener("click", () => {
+  state.research = !state.research;
+  const b = $("research-toggle");
+  b.setAttribute("aria-pressed", String(state.research));
+  b.style.background = state.research ? "var(--accent, #B85C38)" : "";
+  $("input").placeholder = state.research
+    ? "Research topic — Indus will search, learn, and answer with sources…"
+    : "Message Indus…";
+});
+
+async function sendResearch(topic) {
+  const cv = currentConv();
+  cv.msgs.push({ role: "you", text: `🔬 research: ${topic}` });
+  addMessage("you", `🔬 ${topic}`);
+  const target = addMessage("indus", "");
+  let acc = "";
+  try {
+    const res = await fetch("/api/research", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: state.sid + ":" + cv.id,
+        topic,
+        train: true,
+        steps: 60,
+      }),
+    });
+    if (!res.ok || !res.body) throw new Error(await res.text());
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const raw = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 2);
+        if (!raw.startsWith("data:")) continue;
+        const ev = JSON.parse(raw.slice(5));
+        if (ev.t === "status") {
+          acc += `\n› ${ev.v}\n`;
+        } else if (ev.t === "sources") {
+          acc += `\n📚 sources: ${ev.v.join(" · ")}\n`;
+        } else if (ev.t === "learn") {
+          try {
+            const d = JSON.parse(ev.v);
+            acc += `\n🧠 learned=${d.accepted} probe `
+                 + `${d.probe_before}→${d.probe_after} | fresh `
+                 + `${d.fresh_before}→${d.fresh_after}\n`;
+          } catch (_) {}
+        } else if (ev.t === "tok") {
+          acc += ev.v;
+        }
+        target.textContent = acc.trim();
+        target.appendChild(target._cursor);
+        scrollDown();
+      }
+    }
+  } catch (err) {
+    target.textContent = acc || "(research failed — is the server up?)";
+    console.error(err);
+  }
+  if (target._cursor) target._cursor.remove();
+  cv.msgs.push({ role: "indus", text: acc });
+  persistConvs();
+}
+
 /* ───────────────────────── chat streaming ─────────────────────── */
 async function send(text) {
   if (state.busy || !text.trim()) return;
@@ -247,12 +318,15 @@ $("new-chat").onclick = () => {
 };
 document.querySelectorAll(".starter").forEach(b =>
   b.onclick = () => send(b.textContent));
-$("send").onclick = () => { const v = $("input").value; $("input").value = ""; send(v); };
+$("send").onclick = () => {
+  const v = $("input").value; $("input").value = "";
+  state.research ? sendResearch(v) : send(v);
+};
 $("input").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     const v = $("input").value; $("input").value = ""; autoGrow();
-    send(v);
+    state.research ? sendResearch(v) : send(v);
   }
 });
 function autoGrow() {
