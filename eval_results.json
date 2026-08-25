@@ -1,0 +1,10 @@
+{
+  "7000": {
+    "checkpoint_step": 7000,
+    "params_M": 9.74,
+    "wikitext103_ppl": 24572.89,
+    "wikitext_tokens": 465920,
+    "arc_easy_acc": 0.2148,
+    "arc_easy_n": 512
+  }
+}

@@ -1,0 +1,30 @@
+# secrets & credentials - NEVER commit
+.env
+.env.*
+*.env
+kaggle.json
+access_token
+*token*
+hf_token.txt
+
+# generated kaggle payloads (contain injected tokens)
+kaggle/build/
+kaggle/output/
+
+# data & artifacts
+data/
+checkpoints/
+*.bin
+*.ckpt
+*.safetensors
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# heavy artifacts
+corpus/
+logs/
+webapp/__pycache__/
+kaggle/

@@ -1,0 +1,7 @@
+torch>=2.2
+numpy>=1.24
+
+# local orchestration (not needed inside Kaggle kernels)
+huggingface_hub>=0.23
+kaggle>=2.2          # KGAT token auth; set KAGGLE_API_TOKEN env var
+requests>=2.31
