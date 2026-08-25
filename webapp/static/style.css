@@ -172,3 +172,19 @@ body {
   #app { grid-template-columns: 1fr; }
   #sidebar { display: none; }
 }
+
+/* ─────────────── feedback bar ─────────────── */
+.feedback-bar { display: flex; gap: 8px; align-items: center; margin-top: 9px; }
+.fb-btn {
+  background: none; border: 1px solid var(--line); border-radius: 8px;
+  padding: 3px 9px; cursor: pointer; font-size: .85rem;
+}
+.fb-btn:hover:not(:disabled) { border-color: var(--terracotta); }
+.fb-btn:disabled { opacity: .45; cursor: default; }
+.teach-box {
+  flex: 1; border: 1px solid var(--terracotta); border-radius: 9px;
+  padding: 7px 10px; font: inherit; font-size: .84rem; resize: none;
+  background: rgba(255,255,255,.6); color: var(--ink); height: 60px;
+}
+.teach-box:disabled { opacity: .6; }
+.fb-status { font-size: .72rem; color: var(--teal); }

@@ -67,6 +67,7 @@ class Session:
         for p in cand:
             if p and os.path.exists(p):
                 self.tok = BPETokenizer.load(p)
+                self.tok.add_chat_specials()
                 self.tok_path = p
                 return
         raise SystemExit("tokenizer.json not found (pass --tokenizer)")
@@ -106,8 +107,10 @@ class Session:
 
     # ------------------------------------------------------------ prompting
     def has_chat_template(self) -> bool:
+        # tokenizer knows the specials AND the checkpoint's embeddings cover them
+        needed = max(self.tok.special_tokens.values()) + 1
         return "<|assistant|>" in self.tok.special_tokens and \
-            self.cfg.vocab_size >= max(self.tok.special_tokens.values()) + 1 - 4
+            self.cfg.vocab_size >= needed
 
     def build_prompt_ids(self, user_msg: str) -> list[int]:
         if self.has_chat_template():
@@ -169,10 +172,29 @@ class Session:
             self.history + user_msg + "\n"
         self.turns += 1
         self.transcript += [("you", user_msg), ("indus", reply_text)]
+        # remember last exchange for feedback commands
+        self.last_prompt, self.last_reply = user_msg, reply_text
         # bounded context: drop oldest half if runaway
         if len(self.history) > self.cfg.block_size * 6:
             self.history = self.history[len(self.history) // 2:]
         return reply_text
+
+    def log_feedback(self, verdict: str, correction: str | None = None) -> None:
+        p = getattr(self, "last_prompt", None)
+        if not p:
+            print(c("  ! no exchange to rate yet", "red", self.args.color))
+            return
+        os.makedirs("data_feedback", exist_ok=True)
+        with open("data_feedback/feedback.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": time.time(), "session": "cli",
+                "prompt": p[:2000], "reply": (self.last_reply or "")[:4000],
+                "verdict": verdict, "correction": correction,
+            }) + "\n")
+        label = {"up": "👍 saved — will reinforce", "down": "👎 saved",
+                 "taught": "🎓 taught — trains later"}[verdict]
+        print(c(f"  * {label} ({sum(1 for _ in open('data_feedback/feedback.jsonl'))} total)",
+                "dim", self.args.color))
 
 
 HELP = f"""
@@ -187,6 +209,9 @@ HELP = f"""
   /local <path>      switch to a local .pt checkpoint
   /stats             model & session statistics
   /save [file.md]    save transcript
+  /good //bad        rate the last reply (feedback log)
+  /teach <answer>    correct the last reply (becomes training data)
+  /learn             fine-tune on all feedback now (train_from_feedback)
   /quit              exit
 """
 
@@ -272,6 +297,19 @@ def main() -> None:
                     for role, text in sess.transcript:
                         f.write(f"**{'🧑' if role=='you' else '⛰'} {role}:** {text}\n\n")
                 print(c(f"  * saved {fname}", "dim", args.color))
+            elif cmd in ("/good", "/up"):
+                sess.log_feedback("up")
+            elif cmd in ("/bad", "/down"):
+                sess.log_feedback("down")
+            elif cmd == "/teach":
+                # /teach <better answer...>  → correction replaces last reply
+                if not arg:
+                    print(c("  ! usage: /teach <better answer>", "red", args.color))
+                else:
+                    sess.log_feedback("taught", correction=arg)
+            elif cmd == "/learn":
+                os.system(f"{sys.executable} "
+                          f"{os.path.join(os.path.dirname(__file__), 'train_from_feedback.py')}")
             else:
                 print(c("  ! unknown command (/help)", "red", args.color))
             continue

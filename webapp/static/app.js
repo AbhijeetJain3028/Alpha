@@ -67,11 +67,63 @@ function addMessage(role, text, animate = true) {
     txt._cursor = cur;
   }
   body.append(who, txt);
+  if (role === "indus") body.appendChild(feedbackBar(text));
   wrap.append(av, body);
   $("welcome")?.style.setProperty("display", "none");
   $("messages").appendChild(wrap);
   scrollDown();
   return txt;
+}
+
+/* thumbs + teach-a-better-answer bar under each indus reply */
+function feedbackBar(replyText) {
+  const bar = document.createElement("div");
+  bar.className = "feedback-bar";
+  const up = document.createElement("button");
+  up.className = "fb-btn"; up.title = "Good reply"; up.textContent = "👍";
+  const down = document.createElement("button");
+  down.className = "fb-btn"; down.title = "Bad reply"; down.textContent = "👎";
+  const teach = document.createElement("textarea");
+  teach.className = "teach-box";
+  teach.placeholder = "Teach Indus a better answer… (⏎ to submit)";
+  teach.hidden = true;
+  const status = document.createElement("span");
+  status.className = "fb-status";
+
+  async function post(verdict, correction) {
+    try {
+      const r = await fetch("/api/feedback", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: state.sid, prompt: lastUserText(), reply: replyText,
+          verdict, correction: correction || null,
+        }),
+      });
+      status.textContent = r.ok ? "saved ✓ trains later" : "failed";
+    } catch { status.textContent = "offline"; }
+  }
+
+  up.onclick = () => { up.disabled = down.disabled = true; post("up"); };
+  down.onclick = () => {
+    up.disabled = true; down.disabled = true;
+    teach.hidden = false; teach.focus(); post("down");
+  };
+  teach.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const v = teach.value.trim();
+      if (!v) return;
+      teach.disabled = true; teach.hidden = false;
+      post("taught", v);          // correction replaces the reply in training
+      status.textContent = "taught ✓ trains later";
+    }
+  });
+  bar.append(up, down, teach, status);
+  return bar;
+}
+function lastUserText() {
+  const msgs = [...document.querySelectorAll(".msg.you .text")];
+  return msgs.length ? msgs[msgs.length - 1].textContent : "";
 }
 function scrollDown() {
   const sc = $("chat-scroll");
@@ -105,6 +157,7 @@ async function send(text) {
         temperature: state.temp,
         top_k: state.topk,
         max_tokens: state.maxtok,
+        system: state.system,
       }),
     });
     if (!res.ok || !res.body) throw new Error(await res.text());

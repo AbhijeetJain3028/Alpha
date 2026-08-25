@@ -48,6 +48,7 @@ class ModelManager:
                     self.tok = BPETokenizer.load(p)
                     break
             assert self.tok, "tokenizer.json not found"
+        self.tok.add_chat_specials()   # idempotent
         return self.tok
 
     def load(self, ckpt_path=None, which="ckpt-latest.pt", device=None):
@@ -86,9 +87,18 @@ class ChatRequest(BaseModel):
     temperature: float = 0.7
     top_k: int = 50
     max_tokens: int = 256
+    system: str | None = None
 
 
 SESSIONS: dict[str, dict] = {}
+
+FEEDBACK_PATH = os.path.join(ROOT, "data_feedback", "feedback.jsonl")
+
+
+def log_feedback(entry: dict) -> None:
+    os.makedirs(os.path.dirname(FEEDBACK_PATH), exist_ok=True)
+    with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": time.time(), **entry}) + "\n")
 
 
 def render_history(sess) -> str:
@@ -162,6 +172,10 @@ def chat(req: ChatRequest):
         info()  # triggers lazy load; raises 503 on failure
     sess = SESSIONS.setdefault(req.session_id,
                                {"history": "", "turns": 0, "system": ""})
+    if req.system is not None and req.system.strip():
+        if req.system != sess.get("system"):
+            sess["system"] = req.system.strip()
+            sess["history"], sess["turns"] = "", 0   # system change resets ctx
 
     def gen():
         with MM.lock:
@@ -214,6 +228,41 @@ def chat(req: ChatRequest):
 
 def sse(obj) -> str:
     return f"data: {json.dumps(obj)}\n\n"
+
+
+class FeedbackReq(BaseModel):
+    session_id: str
+    prompt: str
+    reply: str
+    verdict: str            # "up" | "down" | "taught"
+    correction: str | None = None
+
+
+@app.post("/api/feedback")
+def feedback(req: FeedbackReq):
+    if req.verdict not in ("up", "down", "taught"):
+        raise HTTPException(400, "verdict must be up|down|taught")
+    log_feedback({
+        "session": req.session_id,
+        "prompt": req.prompt[:2000],
+        "reply": req.reply[:4000],
+        "verdict": req.verdict,
+        "correction": (req.correction or "")[:4000] or None,
+    })
+    return {"ok": True}
+
+
+@app.get("/api/feedback/stats")
+def feedback_stats():
+    counts = {"up": 0, "down": 0, "taught": 0}
+    if os.path.exists(FEEDBACK_PATH):
+        with open(FEEDBACK_PATH, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    counts[json.loads(line).get("verdict")] += 1
+                except Exception:
+                    continue
+    return counts
 
 
 if __name__ == "__main__":
