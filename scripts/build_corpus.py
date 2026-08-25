@@ -181,21 +181,29 @@ def fetch_wikitext() -> str:
 
 
 # ------------------------------------------------------------- streaming utils
-def iter_docs(path: str):
-    """Stream documents from a normalized corpus file (bounded RAM)."""
+def iter_docs(path: str, max_bytes: int | None = None):
+    """Stream documents from a normalized corpus file (bounded RAM).
+    Optional max_bytes caps how much of the source is consumed."""
+    remaining = max_bytes
     with open(path, encoding="utf-8", buffering=1 << 22) as f:
         carry = ""
         while True:
             block = f.read(1 << 23)             # 8MB
             if not block:
                 break
+            if remaining is not None:
+                if remaining <= 0:
+                    break
+                block = block[:remaining]
+                remaining -= len(block)
             data = carry + block
             parts = data.split(SEP)
             carry = parts.pop()
             for doc in parts:
                 if doc.strip():
                     yield doc
-        if carry.strip():
+        if carry.strip() and (max_bytes is None or remaining is None
+                              or remaining < 0):
             yield carry
 
 
@@ -210,11 +218,13 @@ def source_stats(sources: dict) -> dict:
     return stats
 
 
-def iter_chunks(sources: dict, chunk_chars: int):
-    """Yield ~chunk_chars chunks assembled doc-by-doc across all sources."""
+def iter_chunks(sources: dict, chunk_chars: int, caps: dict | None = None):
+    """Yield ~chunk_chars chunks assembled doc-by-doc across all sources.
+    caps: optional per-source byte limits, e.g. {"fineweb-edu": 600_000_000}"""
+    caps = caps or {}
     buf, blen = [], 0
     for src in SOURCES:
-        for doc in iter_docs(sources[src]):
+        for doc in iter_docs(sources[src], max_bytes=caps.get(src)):
             buf.append(doc)
             blen += len(doc)
             if blen >= chunk_chars:
@@ -259,7 +269,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ts-bytes", type=int, default=500_000_000,
-                    help="bytes of TinyStories to stream")
+                help="bytes of TinyStories to stream")
+    ap.add_argument("--fw-bytes", type=int, default=None,
+                help="cap FineWeb-Edu chars (phase-2 mix control)")
+    ap.add_argument("--wiki-bytes", type=int, default=None,
+                help="cap WikiText-103 chars")
     ap.add_argument("--fineweb-file", type=int, default=0)
     ap.add_argument("--vocab-size", type=int, default=16384)
     ap.add_argument("--tokenizer-sample-chars", type=int, default=120_000_000)
@@ -375,7 +389,8 @@ def main() -> None:
     with ProcessPoolExecutor(args.workers, initializer=_init_worker,
                              initargs=(tok_path,)) as ex:
         max_pending = args.workers * 3
-        chunks = iter_chunks(sources, args.chunk_chars)
+        caps = {"fineweb-edu": args.fw_bytes, "wikitext103": args.wiki_bytes}
+        chunks = iter_chunks(sources, args.chunk_chars, caps)
         if start_n:
             chunks = itertools.islice(chunks, start_n, None)
         for chunk in chunks:

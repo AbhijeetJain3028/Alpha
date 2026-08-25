@@ -174,12 +174,18 @@ else:
     print("[init] fresh model")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+# mixed precision decided here: fp16+GradScaler on pre-Ampere (T4/P100),
+# bf16 without scaler on Ampere+; fused AdamW only on the bf16 path
+# (fused + GradScaler.unscale_ is an unsupported combination)
+cc_major = torch.cuda.get_device_capability(0)[0] if device == "cuda" else 0
+AMP_DTYPE = torch.bfloat16 if cc_major >= 8 else torch.float16
+USE_AMP = device == "cuda"
 model = model.to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4,
                               betas=(0.9, 0.95), eps=1e-8,
                               weight_decay=cfg.weight_decay,
-                              fused=(device == "cuda"))
+                              fused=(USE_AMP and AMP_DTYPE == torch.bfloat16))
 if best is not None and best.get("optimizer"):
     optimizer.load_state_dict(best["optimizer"])
 if best is not None and best.get("rng"):
@@ -235,11 +241,9 @@ def lr_at(step: int) -> float:
 
 
 # mixed precision: fp16 on pre-Ampere GPUs (P100/T4), bf16 otherwise
-cc_major = torch.cuda.get_device_capability(0)[0] if device == "cuda" else 0
-AMP_DTYPE = torch.bfloat16 if cc_major >= 8 else torch.float16
-USE_AMP = device == "cuda"
 scaler = torch.amp.GradScaler(enabled=USE_AMP and AMP_DTYPE == torch.float16)
-print(f"amp: {'off' if not USE_AMP else str(AMP_DTYPE).split('.')[-1]}")
+print(f"amp: {'off' if not USE_AMP else str(AMP_DTYPE).split('.')[-1]} "
+      f"| adamw fused: {optimizer.defaults.get('fused', False)}")
 
 train_ds = TokenDataset(os.path.join(data_dir, "train.bin"))
 val_ds = TokenDataset(os.path.join(data_dir, "val.bin"))
