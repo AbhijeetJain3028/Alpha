@@ -99,11 +99,55 @@ def cmd_dataset(args) -> None:
         print(f"[kaggle] created dataset {KAGGLE_USER}/{DATA_SLUG}")
 
 
+
+
+# ------------------------------------------------------------- distill kernel
+DISTILL_TEMPLATE = ROOT / "scripts" / "kernel_indus_distill.py"
+DISTILL_SLUG = "indus-distill"
+
+
+def render_distill_kernel(args) -> Path:
+    folder = BUILD / DISTILL_SLUG
+    folder.mkdir(parents=True, exist_ok=True)
+    src = DISTILL_TEMPLATE.read_text()
+    src = src.replace("__HF_TOKEN__", args.hf_token or "__HF_TOKEN__")
+    src = src.replace("__HF_REPO_ID__", args.hf_repo)
+    src = src.replace("__TEACHER__", args.teacher)
+    src = src.replace("__N_SAMPLES__", str(args.n_samples))
+    script = folder / "indus_distill_kernel.py"
+    script.write_text(src)
+    meta = {
+        "id": f"{KAGGLE_USER}/{DISTILL_SLUG}",
+        "title": DISTILL_SLUG,
+        "code_file": "indus_distill_kernel.py",
+        "language": "python",
+        "kernel_type": "script",
+        "is_private": "true",
+        "enable_gpu": "false",
+        "enable_internet": "true" if not args.no_internet else "false",
+        "machine_shape": args.accelerator,
+        "dataset_sources": [],
+        "competition_sources": [],
+        "kernel_sources": [],
+        "model_sources": [],
+    }
+    (folder / "kernel-metadata.json").write_text(json.dumps(meta, indent=2))
+    return folder
+
+
+def cmd_push_distill(args) -> None:
+    api = load_api()
+    folder = render_distill_kernel(args)
+    res = api.kernels_push(folder=str(folder), acc=args.accelerator)
+    print("[kaggle] pushed distill:", getattr(res, "url", res))
+
+
 # ------------------------------------------------------------------------ kernel
 def render_kernel(args) -> Path:
     if not args.hf_repo:
         raise SystemExit("--hf-repo required (or set HF_REPO)")
-    folder = BUILD / KERNEL_SLUG
+    slug = getattr(args, 'slug', None) or KERNEL_SLUG
+    folder = BUILD / slug
     folder.mkdir(parents=True, exist_ok=True)
 
     src = KERNEL_TEMPLATE.read_text()
@@ -123,8 +167,8 @@ def render_kernel(args) -> Path:
     os.chmod(script, 0o600)  # contains the HF token
 
     meta = {
-        "id": f"{KAGGLE_USER}/{KERNEL_SLUG}",
-        "title": "indus-train",
+        "id": f"{KAGGLE_USER}/{slug}",
+        "title": slug,
         "code_file": "indus_train_kernel.py",
         "language": "python",
         "kernel_type": "script",
@@ -146,7 +190,8 @@ def cmd_push(args) -> None:
     folder = render_kernel(args)
     res = api.kernels_push(folder=str(folder), acc=args.accelerator)
     print("[kaggle] pushed:", getattr(res, "url", res))
-    print(f"monitor: https://www.kaggle.com/{KAGGLE_USER}/{KERNEL_SLUG}")
+    slug = getattr(args, "slug", None) or KERNEL_SLUG
+    print(f"monitor: https://www.kaggle.com/{KAGGLE_USER}/{slug}")
 
 
 # ------------------------------------------------------------------- sft kernel
@@ -257,6 +302,8 @@ def main() -> None:
 
     ps = sub.add_parser("push-sft",
                         help="launch the chat fine-tuning kernel on GPU")
+    p.add_argument("--slug", default=None,
+                   help="kernel slug override (e.g. indus-base-train)")
     ps.add_argument("--sft-steps", type=int, default=2000)
     ps.add_argument("--sft-batch", type=int, default=16)
     ps.add_argument("--no-internet", action="store_true")
@@ -266,6 +313,19 @@ def main() -> None:
     ps.add_argument("--hf-repo", default=os.environ.get("HF_REPO",
                     "AbhijeetJain4075/indus-llm"))
     ps.set_defaults(fn=cmd_push_sft)
+
+    pd = sub.add_parser("push-distill",
+                        help="data-distillation run from an Apache-2.0 teacher")
+    pd.add_argument("--teacher",
+                    default="HuggingFaceTB/SmolLM2-360M-Instruct")
+    pd.add_argument("--n-samples", type=int, default=4000)
+    pd.add_argument("--no-internet", action="store_true")
+    pd.add_argument("--accelerator", default="NvidiaTeslaT4",
+                    choices=["NvidiaTeslaT4", "NvidiaTeslaP100"])
+    pd.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"))
+    pd.add_argument("--hf-repo", default=os.environ.get("HF_REPO",
+                    "AbhijeetJain4075/indus-llm"))
+    pd.set_defaults(fn=cmd_push_distill)
 
     p = sub.add_parser("status")
     p.add_argument("--kernel", default=None,

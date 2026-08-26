@@ -46,15 +46,20 @@ from huggingface_hub import HfApi, hf_hub_download  # noqa: E402
 
 hub = HfApi(token=HF_TOKEN or None)
 
-# pick freshest base: local mounts first, else hub
+# pick freshest base: local mounts first, else hub (prefer val-best ckpt)
 base = None
-cands = sorted(glob.glob(f"{INPUT}/**/ckpt-latest.pt", recursive=True),
-               key=os.path.getmtime)
-if cands:
-    base = cands[-1]
-else:
-    base = hf_hub_download(HF_REPO_ID, "ckpt-latest.pt", repo_type="model",
-                           token=HF_TOKEN)
+for name in ("ckpt-best.pt", "ckpt-latest.pt"):
+    cands = sorted(glob.glob(f"{INPUT}/**/{name}", recursive=True),
+                   key=os.path.getmtime)
+    if cands:
+        base = cands[-1]
+        break
+    try:
+        base = hf_hub_download(HF_REPO_ID, name, repo_type="model",
+                               token=HF_TOKEN)
+        break
+    except Exception:
+        continue
 print("[load] base:", base)
 
 os.environ["HF_TOKEN"] = HF_TOKEN     # train_sft auto-upload reads env
