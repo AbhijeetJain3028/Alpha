@@ -24,6 +24,9 @@ class IndusConfig:
     dropout: float = 0.0            # dropout on attn output + mlp output
     weight_decay: float = 0.1
 
+    # optimizer stack
+    use_muon: bool = False         # Muon on matrices + AdamW on vectors
+
     # mixture-of-experts (dormant unless use_moe; needs fresh pretrain)
     use_moe: bool = False
     n_experts: int = 8              # total SwiGLU experts per block

@@ -31,3 +31,6 @@ kaggle/
 
 # runtime knowledge store
 knowledge/
+
+# local export output
+out/

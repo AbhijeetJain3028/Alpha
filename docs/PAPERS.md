@@ -131,6 +131,8 @@ train.py:cosine     ← SGDR'16
 data.py             ← nanoGPT, Kaplan'20
 presets/tokens      ← Chinchilla'22, TinyStories'23
 whole arch          ← Vaswani'17 decoder + Xiong'20 pre-norm + LLaMA'23
+muon.py             ← Jordan'24 Muon + Kimi K2'25 scale validation
+export_gguf.py      ← LLaMA'23 tensor ABI (llama.cpp/GGUF ecosystem)
 autonomous.py       ← REALM/RAG/RA-DIT + Toolformer + STaR/Self-RAG +
                       WebGPT/Search-R1 + EWC (replay+gate)
 moe.py              ← Shazeer'17 / Switch'22 / DeepSeekMoE'24

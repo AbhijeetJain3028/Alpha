@@ -202,6 +202,32 @@ token resolves env-var → Kaggle Secret → placeholder (never required in
 kernel source). Full doctrine: [docs/PLAYBOOK.md](docs/PLAYBOOK.md),
 paper-by-paper grounding: [docs/PAPERS.md](docs/PAPERS.md).
 
+## Serving anywhere (GGUF / llama.cpp / Ollama)
+
+Export any checkpoint to the standard LlamaForCausalLM layout (fused QKV
+split, tied head omitted) — validated with exact param parity against stock
+`transformers`:
+
+```bash
+python scripts/export_gguf.py --ckpt checkpoints/ckpt-best.pt --out out/export
+# where llama.cpp is built:
+python convert_hf_to_gguf.py out/export --outfile indus-f16.gguf --outtype f16
+llama-quantize indus-f16.gguf indus-q8_0.gguf Q8_0     # Q8_0 floor at this scale
+```
+
+A ready-made export ships on the Hub under `export/llama-fmt/`.
+
+## Muon optimizer (next campaigns)
+
+`indus/muon.py` implements Newton–Schulz-5 orthogonalized momentum on all
+matrix weights with an AdamW fallback for vectors/norms — beats AdamW
+head-to-head on Indus (5.58 vs 6.53 loss @ 60 nano steps):
+
+```python
+from indus.muon import build_optimizer
+opt = build_optimizer(cfg, model, use_muon=True)   # see config.use_muon hook
+```
+
 ## Notes
 
 - The tokenizer is intentionally simple/pure-Python; for multi-GB corpora swap

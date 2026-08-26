@@ -31,7 +31,9 @@ WIKITEXT_VAL = ("https://huggingface.co/datasets/Salesforce/wikitext/"
                 "resolve/main/wikitext-103-raw-v1/validation-00000-of-00001.parquet")
 LAMBADA_URLS = [
     "https://huggingface.co/datasets/EleutherAI/lambada_openai/resolve/main/"
-    "lambada_test_en.txt",
+    "data/lambada_test_en.jsonl",
+    "https://huggingface.co/datasets/EleutherAI/lambada_openai/resolve/main/"
+    "lambada_openai.txt",
 ]
 ARC_EASY = ("https://huggingface.co/datasets/allenai/ai2_arc/"
             "resolve/main/ARC-Easy/test-00000-of-00001.parquet")
@@ -105,6 +107,13 @@ def lambada_acc(model, tok, device, max_examples=1500):
     buffer = []
     with open(path, encoding="utf-8") as f:
         for line in f:
+            if not line.strip():
+                continue
+            if path.endswith(".jsonl"):            # new HF layout
+                try:
+                    line = json.loads(line).get("text", "")
+                except json.JSONDecodeError:
+                    pass
             buffer.append(line.strip())
             if len(buffer) >= max_examples:
                 break
