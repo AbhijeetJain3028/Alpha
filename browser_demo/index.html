@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Indus — in your browser</title>
+<style>
+  :root { --bg:#171512; --panel:#221f1a; --accent:#B85C38; --text:#F5EFE4;
+          --good:#4a7c59; --bad:#a5493d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:16px/1.6 ui-sans-serif,system-ui,sans-serif;
+         display:flex; flex-direction:column; height:100vh; }
+  header { padding:14px 18px; border-bottom:1px solid #3a352c;
+           display:flex; gap:10px; align-items:center; }
+  .seal { width:34px; height:34px; border-radius:8px; background:var(--accent);
+          display:flex; align-items:center; justify-content:center;
+          font-weight:700; color:#fff; }
+  h1 { font-size:18px; margin:0; }
+  .sub { opacity:.7; font-size:13px; margin-left:auto; text-align:right; }
+  #log { flex:1; overflow-y:auto; padding:18px; display:flex;
+         flex-direction:column; gap:14px; }
+  .msg { max-width:min(720px,92%); padding:10px 14px; border-radius:12px;
+         white-space:pre-wrap; word-wrap:break-word; }
+  .you { background:#2e2a23; align-self:flex-end; border-bottom-right-radius:4px; }
+  .indus { background:var(--panel); border:1px solid #3a352c;
+           align-self:flex-start; border-bottom-left-radius:4px; }
+  .note { font-size:12px; opacity:.55; align-self:center; }
+  .actions { font-size:12px; opacity:.8; align-self:flex-start;
+             margin-top:-8px; display:flex; gap:10px; align-items:center; }
+  .actions button { background:none; border:1px solid #3a352c; color:var(--text);
+                    border-radius:6px; padding:2px 8px; cursor:pointer; font-size:12px; }
+  .actions button.on-good { border-color:var(--good); }
+  .actions button.on-bad { border-color:var(--bad); }
+  .teach { max-width:min(720px,92%); align-self:flex-start; width:min(720px,92%);
+           background:var(--panel); border:1px dashed var(--accent);
+           border-radius:10px; padding:10px; display:none;
+           flex-direction:column; gap:8px; }
+  .teach textarea { width:100%; min-height:70px; background:#171512;
+                    color:var(--text); border:1px solid #3a352c;
+                    border-radius:8px; padding:8px; font:14px/1.5 inherit; }
+  form { display:flex; gap:8px; padding:12px 18px; border-top:1px solid #3a352c; }
+  textarea#in { flex:1; background:var(--panel); color:var(--text);
+             border:1px solid #3a352c; border-radius:10px; padding:10px 12px;
+             resize:none; font:inherit; min-height:44px; }
+  button.go { background:var(--accent); color:#fff; border:0; border-radius:10px;
+           padding:0 22px; font-size:16px; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:wait; }
+</style>
+</head>
+<body>
+<header>
+  <div class="seal">⛰</div>
+  <h1>INDUS <span style="opacity:.6;font-weight:400">31.6M · from scratch</span></h1>
+  <div class="sub"><span id="status">loading model (~68 MB, cached after first visit)…</span><br>
+    <button id="export-fb" style="margin-top:4px">⬇ Export teaching data (<span id="fb-count">0</span>)</button></div>
+</header>
+<div id="log">
+  <div class="note">Runs entirely in YOUR browser — no server sees your words.<br>
+  Rate replies 👍/👎 or ✏️ teach a better answer: lessons are stored locally,
+  exported as JSONL, and turned into <b>real weight updates</b> by the training
+  pipeline. Taught answers also apply instantly this session.</div>
+</div>
+<div class="teach" id="teach-panel">
+  <b style="font-size:13px">Teach Indus a better answer:</b>
+  <textarea id="teach-text"></textarea>
+  <div style="display:flex;gap:8px">
+    <button class="go" id="teach-save" style="padding:6px 16px">Save lesson</button>
+    <button id="teach-cancel" style="background:none;border:1px solid #3a352c;color:var(--text);border-radius:8px;padding:6px 12px">Cancel</button>
+  </div>
+</div>
+<form id="f">
+  <textarea id="in" placeholder="Message Indus…" rows="1"></textarea>
+  <button class="go" id="go">➤</button>
+</form>
+
+<script type="module">
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.all.min.mjs";
+import { IndusTokenizer } from "./tokenizer.js";
+
+const MODEL_URL = "./indus-base-sft.onnx";
+const TOK_URL = "./tokenizer_payload.json";
+const EOT_NAME = "<|endoftext|>", END_NAME = "<|end|>";
+const MAX_CTX = 1024;
+
+const log = document.getElementById("log");
+const statusEl = document.getElementById("status");
+const btn = document.getElementById("go");
+const input = document.getElementById("in");
+
+let session = null, tok = null, EOT = null, END = null;
+let lastPrompt = "";
+
+/* ─────────── local teaching memory (the trainable part) ─────────── */
+const FB_KEY = "indus.teaching.v1";
+const loadFB = () => JSON.parse(localStorage.getItem(FB_KEY) || "[]");
+const saveFB = (arr) => localStorage.setItem(FB_KEY, JSON.stringify(arr));
+function fbCount() { document.getElementById("fb-count").textContent = loadFB().length; }
+
+function addFeedback(record) {
+  const arr = loadFB();
+  arr.push({ ts: Date.now(), ...record });
+  saveFB(arr); fbCount();
+}
+
+document.getElementById("export-fb").addEventListener("click", () => {
+  const rows = loadFB().map(r => JSON.stringify({
+    session: "browser", prompt: r.prompt, reply: r.reply,
+    verdict: r.verdict, correction: r.correction || null }));
+  const blob = new Blob([rows.join("\n") + "\n"], { type: "application/x-ndjson" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "feedback.jsonl";
+  a.click();
+});
+
+/* taught-answer instant recall (in-context learning) */
+function taughtAnswerFor(prompt) {
+  const p = prompt.toLowerCase().replace(/[^\w\s]/g, "").trim();
+  return loadFB().filter(r => r.verdict === "taught").find(r =>
+    r.prompt.toLowerCase().replace(/[^\w\s]/g, "").includes(p.slice(0, Math.max(12, p.length >> 1)))
+  ) || null;
+}
+
+/* ────────────────────────── model core ──────────────────────────── */
+function addMsg(cls, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+async function init() {
+  try {
+    const payload = await (await fetch(TOK_URL)).json();
+    tok = new IndusTokenizer(payload);
+    EOT = tok.specials[EOT_NAME]; END = tok.specials[END_NAME];
+    session = await ort.InferenceSession.create(MODEL_URL,
+      { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+    statusEl.textContent = "ready ✓ (wasm)";
+    btn.disabled = false;
+  } catch (e) {
+    statusEl.textContent = "load failed: " + e.message;
+  }
+}
+
+function sample(logits, temperature, topK) {
+  const arr = Array.from(logits, v => v / temperature);
+  const idx = Array.from(arr.keys());
+  idx.sort((a, b) => arr[b] - arr[a]);
+  const cands = idx.slice(0, topK);
+  const mx = Math.max(...cands.map(i => arr[i]));
+  const probs = cands.map(i => Math.exp(arr[i] - mx));
+  let r = probs.reduce((a, b) => a + b, 0) * Math.random();
+  for (let i = 0; i < cands.length; i++) {
+    r -= probs[i];
+    if (r <= 0) return cands[i];
+  }
+  return cands[0];
+}
+
+async function generate(ids, onToken) {
+  let ctx = ids.slice(-MAX_CTX);
+  const out = [];
+  for (let n = 0; n < 140; n++) {
+    const feeds = { input_ids: new ort.Tensor("int64",
+      BigInt64Array.from(ctx.map(BigInt)), [1, ctx.length]) };
+    const res = await session.run(feeds);
+    const V = res.logits.dims[2];
+    const last = res.logits.data.slice((ctx.length - 1) * V, ctx.length * V);
+    const nxt = sample(last, 0.75, 40);
+    if (nxt === EOT || nxt === END) break;
+    out.push(nxt); onToken(nxt);
+    ctx.push(nxt);
+    if (ctx.length > MAX_CTX) ctx = ctx.slice(-MAX_CTX);
+  }
+  return out;
+}
+
+function attachActions(bubble, promptText, getReplyText) {
+  const row = document.createElement("div");
+  row.className = "actions";
+  const up = document.createElement("button"); up.textContent = "👍 good";
+  const down = document.createElement("button"); down.textContent = "👎 bad";
+  const teach = document.createElement("button"); teach.textContent = "✏️ teach";
+  up.onclick = () => { addFeedback({ prompt: promptText, reply: getReplyText(),
+    verdict: "up" }); up.classList.add("on-good");
+    up.textContent = "👍 learned!"; };
+  down.onclick = () => { addFeedback({ prompt: promptText, reply: getReplyText(),
+    verdict: "down" }); down.classList.add("on-bad"); };
+  teach.onclick = () => {
+    const panel = document.getElementById("teach-panel");
+    document.getElementById("teach-text").value = getReplyText();
+    panel.style.display = "flex";
+    panel.dataset.prompt = promptText;
+    panel.scrollIntoView({ behavior: "smooth" });
+  };
+  row.append(up, down, teach);
+  bubble.after(row);
+}
+
+document.getElementById("teach-cancel").onclick = () =>
+  document.getElementById("teach-panel").style.display = "none";
+document.getElementById("teach-save").onclick = () => {
+  const panel = document.getElementById("teach-panel");
+  const text = document.getElementById("teach-text").value.trim();
+  if (!text || !panel.dataset.prompt) return;
+  addFeedback({ prompt: panel.dataset.prompt, reply: text, verdict: "taught",
+                correction: text });
+  panel.style.display = "none";
+  const note = addMsg("note", "🧠 Lesson stored — applied instantly this "
+    + "session, and included in your next teaching-data export.");
+};
+
+document.getElementById("f").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = input.value.trim();
+  if (!msg || !session) return;
+  input.value = "";
+  addMsg("you", msg);
+  lastPrompt = msg;
+
+  // instant in-session learning: taught answers take precedence
+  const lesson = taughtAnswerFor(msg);
+  if (lesson) {
+    addMsg("indus", lesson.correction + "\n\n(from your teaching)");
+    btn.disabled = false;
+    return;
+  }
+
+  const bubble = addMsg("indus", "");
+  btn.disabled = true;
+  const prompt = `<|user|>\n${msg}<|end|>\n<|assistant|>\n`;
+  try {
+    await generate(tok.encodeWithSpecials(prompt),
+      id => { bubble.textContent += tok.decode([id]); log.scrollTop = log.scrollHeight; });
+  } catch (err) { bubble.textContent += "\n[wasm error: " + err.message + "]"; }
+  attachActions(bubble, msg, () => bubble.textContent);
+  btn.disabled = false; input.focus();
+});
+
+btn.disabled = true;
+fbCount();
+init();
+</script>
+</body>
+</html>
