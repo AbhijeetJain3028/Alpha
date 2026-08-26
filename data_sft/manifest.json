@@ -1,0 +1,11 @@
+{
+  "conversations": 12500,
+  "tokens": 4241167,
+  "assistant_token_fraction": 0.56,
+  "vocab_size": 4100,
+  "sources": {
+    "oasst1": "Apache-2.0",
+    "dolly": "CC-BY-SA-3.0",
+    "smoltalk": "Apache-2.0"
+  }
+}
