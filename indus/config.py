@@ -74,6 +74,12 @@ PRESETS = {
         n_layer=10, n_head=8, n_kv_head=4, n_embd=512,
         ffn_multiple_of=64, rope_base=10000.0,
     ),
+    # ~150M params - THE FIRST LAUNCH target (technical-data line)
+    "indus-launch-150m": dict(
+        name="indus-launch-150m", vocab_size=4100, block_size=2048,
+        n_layer=24, n_head=12, n_kv_head=4, n_embd=768,
+        ffn_multiple_of=64, rope_base=10000.0,
+    ),
     # ~42M params - needs a small GPU for reasonable training time
     "indus-small": dict(
         name="indus-small", vocab_size=8192, block_size=1024,

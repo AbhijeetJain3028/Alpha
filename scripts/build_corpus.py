@@ -306,6 +306,11 @@ def main() -> None:
                 help="cap WikiText-103 chars")
     ap.add_argument("--distill-jsonl", dest="distill_jsonl", default=None,
                 help="teacher-distilled samples (JSONL) to mix in as a source")
+    ap.add_argument("--sources-json", default=None,
+                help="JSON {sources:[{name,path,license}]} - replaces the "
+                     "default fetchers with pre-normalized txt files")
+    ap.add_argument("--tokenizer", default="data_v2/tokenizer.json",
+                help="existing BPE tokenizer json to reuse (skips training)")
     ap.add_argument("--fineweb-file", type=int, default=0)
     ap.add_argument("--vocab-size", type=int, default=16384)
     ap.add_argument("--tokenizer-sample-chars", type=int, default=120_000_000)
@@ -316,12 +321,22 @@ def main() -> None:
 
     os.makedirs(CORPUS, exist_ok=True)
 
-    paths = {
-        "tinystories": fetch_tinystories(args.ts_bytes),
-        "fineweb-edu": fetch_fineweb_edu(args.fineweb_file),
-        "wikitext103": fetch_wikitext(),
-    }
-    sources = {k: v for k, v in paths.items()}
+    if args.sources_json:
+        # external mix (e.g. corpus_tech): pre-normalized sources, no fetch
+        with open(args.sources_json) as f:
+            entries = json.load(f)["sources"]
+        paths = {e["name"]: e["path"] for e in entries}
+        for e in entries:
+            LICENSES[e["name"]] = e["license"]
+        SOURCES[:] = [e["name"] for e in entries]
+        sources = dict(paths)
+    else:
+        paths = {
+            "tinystories": fetch_tinystories(args.ts_bytes),
+            "fineweb-edu": fetch_fineweb_edu(args.fineweb_file),
+            "wikitext103": fetch_wikitext(),
+        }
+        sources = {k: v for k, v in paths.items()}
 
     # optional distilled-teacher source (corpus v3+)
     if args.distill_jsonl:
@@ -351,8 +366,8 @@ def main() -> None:
         json.dump(stats, f, indent=2)
 
     # ------------------------------------------------------------- tokenizer
-    tok_path = "data_v2/tokenizer.json"
-    os.makedirs("data_v2", exist_ok=True)
+    tok_path = args.tokenizer
+    os.makedirs(os.path.dirname(tok_path) or ".", exist_ok=True)
     if os.path.exists(tok_path):
         print(f"[tok ] exists: {tok_path}")
     else:
@@ -388,25 +403,26 @@ def main() -> None:
     # ---------------------------------------------------------------- encode
     # resumable: progress file records chunk count + exact byte offsets,
     # bins are truncated back to those offsets before appending again
-    prog_path = "data_v2/.encode_progress.json"
+    out_dirname = os.path.dirname(args.tokenizer) or "data_v2"
+    prog_path = f"{out_dirname}/.encode_progress.json"
     start_n = tr_bytes = va_bytes = 0
     if os.path.exists(prog_path):
         with open(prog_path) as f:
             p = json.load(f)
         start_n, tr_bytes, va_bytes = p["chunks"], p["train_bytes"], p["val_bytes"]
-        if (os.path.getsize("data_v2/train.bin") < tr_bytes or
-                os.path.getsize("data_v2/val.bin") < va_bytes):
+        if (os.path.getsize(f"{out_dirname}/train.bin") < tr_bytes or
+                os.path.getsize(f"{out_dirname}/val.bin") < va_bytes):
             start_n = 0                       # inconsistent - restart clean
     print(f"[enc ] workers={args.workers} chunk~{args.chunk_chars // 1000}k chars "
           f"| resuming at chunk {start_n}", flush=True)
 
     import itertools
     mode = "ab" if start_n else "wb"
-    train_f = open("data_v2/train.bin", mode)
-    val_f = open("data_v2/val.bin", mode)
+    train_f = open(f"{out_dirname}/train.bin", mode)
+    val_f = open(f"{out_dirname}/val.bin", mode)
     if start_n:
-        os.truncate("data_v2/train.bin", tr_bytes)
-        os.truncate("data_v2/val.bin", va_bytes)
+        os.truncate(f"{out_dirname}/train.bin", tr_bytes)
+        os.truncate(f"{out_dirname}/val.bin", va_bytes)
     n_tr = n_va = 0
     n_chunks = start_n
     t0 = time.time()
@@ -424,8 +440,8 @@ def main() -> None:
             train_f.flush()
             val_f.flush()
             os.sync()
-            tr_bytes = os.path.getsize("data_v2/train.bin")
-            va_bytes = os.path.getsize("data_v2/val.bin")
+            tr_bytes = os.path.getsize(f"{out_dirname}/train.bin")
+            va_bytes = os.path.getsize(f"{out_dirname}/val.bin")
             with open(prog_path, "w") as f:
                 json.dump({"chunks": n_chunks, "train_bytes": tr_bytes,
                            "val_bytes": va_bytes}, f)
@@ -454,7 +470,7 @@ def main() -> None:
         os.remove(prog_path)
 
     for name, n in (("train", n_tr), ("val", n_va)):
-        with open(f"data_v2/{name}.bin.meta.json", "w") as f:
+        with open(f"{out_dirname}/{name}.bin.meta.json", "w") as f:
             json.dump({"n_tokens": n}, f)
     ratio = total_chars / max(n_tr + n_va, 1)
     print(f"\n[done] train={n_tr:,} val={n_va:,} tokens | "
