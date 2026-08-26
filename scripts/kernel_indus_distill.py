@@ -47,10 +47,20 @@ CHAT_SEEDS = [
     "What is {}? Answer briefly.",
     "Give two fun facts about {}.",
 ]
+# v2: story prompts are CHAT-WRAPPED so the teacher writes narrative instead
+# of meta-commentary about the prompt (round-1 lesson).
+STORY_TEMPLATES = [
+    "Continue this short story with 3 sentences:\n\n{}",
+    "Write a 4-sentence bedtime story that begins with:\n\n{}",
+    "Turn this opening into a tiny complete story with an ending:\n\n{}",
+]
 STORY_SEEDS = [
     "Once upon a time,",
     "The little robot looked up at the sky and",
     "Maya found a door in the garden that",
+    "The old lighthouse keeper heard a knock at midnight and",
+    "Deep in the bamboo forest, a panda discovered",
+    "When the town's clocks all stopped, only",
 ]
 FACT_TOPICS = [
     "the water cycle", "why the sky is blue", "how plants eat sunlight",
@@ -67,8 +77,18 @@ def build_prompts() -> list[str]:
     for topic in FACT_TOPICS:
         for tmpl in CHAT_SEEDS:
             prompts.append(tmpl.format(topic))
+        for tmpl in STORY_TEMPLATES[:2]:
+            prompts.append(tmpl.format(
+                f"a curious child named {rng.choice(['Mia','Arjun','Zoe','Sam'])} "
+                f"learns about {topic}"))
+    # story variety: seeds x templates, cycled
+    i = 0
     while len(prompts) < N_SAMPLES:
-        prompts.append(rng.choice(STORY_SEEDS))
+        seed = STORY_SEEDS[i % len(STORY_SEEDS)]
+        tmpl = STORY_TEMPLATES[(i // len(STORY_SEEDS)) % len(STORY_TEMPLATES)]
+        prompts.append(tmpl.format(seed))
+        i += 1
+    rng.shuffle(prompts)
     return prompts[:N_SAMPLES]
 
 
@@ -81,8 +101,13 @@ def main() -> None:
     print("[setup] teacher:", TEACHER, "| torch:", torch.__version__,
           "| cuda:", torch.cuda.is_available())
     tok = AutoTokenizer.from_pretrained(TEACHER)
+    tok.padding_side = "left"          # REQUIRED for batched generation
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        TEACHER, torch_dtype=torch.float16).to("cuda").eval()
+        TEACHER, dtype=torch.float32).to("cuda").eval()
+    # fp32 on purpose: fp16 overflows -> NaN logits -> device-side assert
+    # poisons the whole CUDA context; 360M in fp32 is only ~1.4 GB.
 
     prompts = build_prompts()
     print(f"[gen ] {len(prompts)} prompts")
@@ -99,10 +124,17 @@ def main() -> None:
                 tokenize=False, add_generation_prompt=True) for p in batch]
             enc = tok(texts, return_tensors="pt", padding=True,
                       truncation=True, max_length=256).to("cuda")
-            gen = model.generate(
-                **enc, max_new_tokens=160, do_sample=True,
-                top_p=0.9, temperature=0.8,
-                pad_token_id=tok.eos_token_id)
+            try:
+                gen = model.generate(
+                    **enc, max_new_tokens=160, do_sample=True,
+                    top_p=0.9, temperature=0.8,
+                    pad_token_id=tok.eos_token_id)
+            except torch.AcceleratorError:
+                # fp16 sampling hiccup -> deterministic retry for this batch
+                print("  [warn] sampler assert on batch - greedy retry")
+                gen = model.generate(
+                    **enc, max_new_tokens=160, do_sample=False,
+                    pad_token_id=tok.eos_token_id)
             for j, p in enumerate(batch):
                 new = gen[j][enc["input_ids"].shape[1]:]
                 comp = tok.decode(new, skip_special_tokens=True).strip()

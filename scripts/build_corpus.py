@@ -265,6 +265,36 @@ def _encode_chunk(chunk: str, val_permille: int):
     return np.array(tr, dtype=np.uint16), np.array(va, dtype=np.uint16)
 
 
+def normalize_distill(jsonl_path: str, out_path: str) -> int:
+    """Distilled teacher samples -> normalized doc file (SEP-separated).
+
+    Each record becomes ONE document containing prompt + completion so the
+    model learns instruction->answer adjacency. Deduped by content hash.
+    """
+    seen: set[str] = set()
+    n = 0
+    with open(out_path + ".tmp", "w", encoding="utf-8") as fh:
+        with open(jsonl_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                p = (r.get("prompt") or "").strip()
+                cpl = (r.get("completion") or "").strip()
+                if len(cpl) < 60:
+                    continue
+                doc = (p + "\n" + cpl).strip() if p else cpl
+                h = hashlib.md5(doc.lower().encode()).hexdigest()
+                if h in seen:
+                    continue
+                seen.add(h)
+                fh.write(doc + SEP)
+                n += 1
+    os.replace(out_path + ".tmp", out_path)
+    return n
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -274,6 +304,8 @@ def main() -> None:
                 help="cap FineWeb-Edu chars (phase-2 mix control)")
     ap.add_argument("--wiki-bytes", type=int, default=None,
                 help="cap WikiText-103 chars")
+    ap.add_argument("--distill-jsonl", dest="distill_jsonl", default=None,
+                help="teacher-distilled samples (JSONL) to mix in as a source")
     ap.add_argument("--fineweb-file", type=int, default=0)
     ap.add_argument("--vocab-size", type=int, default=16384)
     ap.add_argument("--tokenizer-sample-chars", type=int, default=120_000_000)
@@ -290,6 +322,23 @@ def main() -> None:
         "wikitext103": fetch_wikitext(),
     }
     sources = {k: v for k, v in paths.items()}
+
+    # optional distilled-teacher source (corpus v3+)
+    if args.distill_jsonl:
+        if os.path.exists(args.distill_jsonl):
+            n_docs = normalize_distill(args.distill_jsonl,
+                                       os.path.join(CORPUS, "distill.txt"))
+            if n_docs:
+                sources["distill"] = os.path.join(CORPUS, "distill.txt")
+                SOURCES.append("distill")       # interleave with the rest
+                LICENSES["distill"] = "Apache-2.0-derived (SmolLM2 output)"
+                print(f"[distill] {n_docs:,} unique teacher docs mixed in",
+                      flush=True)
+            else:
+                print("[distill] no usable records - skipped", flush=True)
+        else:
+            print(f"[distill] file not found: {args.distill_jsonl} - skipped",
+                  flush=True)
 
     print("[stat] counting corpus ...", flush=True)
     stats = source_stats(sources)
