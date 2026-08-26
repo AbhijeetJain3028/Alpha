@@ -48,6 +48,7 @@ SAVE_EVERY_STEPS = int("__SAVE_EVERY_STEPS__")
 EVAL_EVERY = int("__EVAL_EVERY__")
 NUMBERED_EVERY = int("__NUMBERED_EVERY__")   # keep a permanent numbered ckpt
 PATIENCE = int("__PATIENCE__")   # stop after this many evals w/o improvement
+USE_MUON = "__USE_MUON__" == "1" # Muon(matrices)+AdamW(vectors) stack
 SEED = 1337
 
 WORK = os.environ.get("INDUS_WORK", "/kaggle/working")
@@ -182,10 +183,32 @@ AMP_DTYPE = torch.bfloat16 if cc_major >= 8 else torch.float16
 USE_AMP = device == "cuda"
 model = model.to(device)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4,
-                              betas=(0.9, 0.95), eps=1e-8,
-                              weight_decay=cfg.weight_decay,
-                              fused=(USE_AMP and AMP_DTYPE == torch.bfloat16))
+BASE_ADAMW_LR = 6e-4 if model.config.n_embd <= 512 else 3e-4
+if USE_MUON:
+    from indus.muon import HybridMuonAdamW
+    optimizer = HybridMuonAdamW(model.parameters(), muon_lr=0.03,
+                                adamw_lr=BASE_ADAMW_LR,
+                                betas=(0.9, 0.95), eps=1e-8,
+                                weight_decay=cfg.weight_decay)
+else:
+    optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4,
+                                  betas=(0.9, 0.95), eps=1e-8,
+                                  weight_decay=cfg.weight_decay,
+                                  fused=(USE_AMP and AMP_DTYPE == torch.bfloat16))
+
+
+def _param_groups(opt):
+    """Unified view over torch.optim / HybridMuonAdamW."""
+    return opt.param_groups() if callable(getattr(opt, "param_groups", None)) \
+        else opt.param_groups
+
+
+def _snapshot_base_lrs(opt):
+    for g in _param_groups(opt):
+        g["_base_lr"] = g["lr"]
+
+
+_snapshot_base_lrs(optimizer)
 if best is not None and best.get("optimizer"):
     optimizer.load_state_dict(best["optimizer"])
 if best is not None and best.get("rng"):
@@ -243,7 +266,7 @@ def lr_at(step: int) -> float:
 # mixed precision: fp16 on pre-Ampere GPUs (P100/T4), bf16 otherwise
 scaler = torch.amp.GradScaler(enabled=USE_AMP and AMP_DTYPE == torch.float16)
 print(f"amp: {'off' if not USE_AMP else str(AMP_DTYPE).split('.')[-1]} "
-      f"| adamw fused: {optimizer.defaults.get('fused', False)}")
+      f"| optimizer: {'Muon-hybrid' if USE_MUON else 'AdamW'}")
 
 train_ds = TokenDataset(os.path.join(data_dir, "train.bin"))
 val_ds = TokenDataset(os.path.join(data_dir, "val.bin"))
@@ -295,9 +318,9 @@ for step in range(start_step, MAX_STEPS):
         print("[signal] stopping early")
         break
 
-    lr = lr_at(step)
-    for g in optimizer.param_groups:
-        g["lr"] = lr
+    ratio = lr_at(step) / (BASE_ADAMW_LR if USE_MUON else 6e-4)
+    for g in _param_groups(optimizer):
+        g["lr"] = g["_base_lr"] * ratio
 
     x, y = get_batch(train_ds, cfg.block_size, BATCH_SIZE, device)
     with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):

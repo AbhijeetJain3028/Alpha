@@ -36,20 +36,30 @@ _bc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_bc)
 SEP = _bc.SEP
 
+from indus.autonomous import clean_text            # noqa: E402
+
 HF = "https://huggingface.co/datasets"
 SOURCES_URL = {
-    "stackedu_py": f"{HF}/HuggingFaceTB/stack-edu/resolve/main/Python/train-0000{i}-of-00005.parquet",
-    "stackedu_md": f"{HF}/HuggingFaceTB/stack-edu/resolve/main/Markdown/train-0000{i}-of-00005.parquet",
-    "nemotron_code": f"{HF}/nvidia/Nemotron-Post-Training-Dataset-v2/resolve/main/data/code-0000{i}-of-00002.parquet",
-    "nemotron_stem": f"{HF}/nvidia/Nemotron-Post-Training-Dataset-v2/resolve/main/data/stem-0000{i}-of-00002.parquet",
+    "openwebmath": HF + "/open-web-math/open-web-math/resolve/main/"
+                   "data/train-{shard}-of-00114-5a023365406cb9c4.parquet",
+}
+NEMOTRON_V1 = {
+    "nemotron_code": "SFT/code/code_v1.1.jsonl",
+    "nemotron_math": "SFT/math/math_v1.1.jsonl",
+    "nemotron_sci": "SFT/science/science.jsonl",
 }
 LICENSES = {
-    "stackedu_py": "Stack-Edu terms (Stack-v2, permissive-derived)",
-    "stackedu_md": "Stack-Edu terms (Stack-v2, permissive-derived)",
+    "stackedu_py": "Stack-v2 terms (permissive-only slice)",
+    "stackedu_md": "Stack-v2 terms (permissive-only slice)",
+    "openwebmath": "ODC-BY-1.0",
     "nemotron_code": "CC-BY-4.0",
-    "nemotron_stem": "CC-BY-4.0",
+    "nemotron_math": "CC-BY-4.0",
+    "nemotron_sci": "CC-BY-4.0",
     "fineweb_edu": "ODC-BY-1.0",
 }
+PERMISSIVE = {"mit", "apache-2.0", "bsd-3-clause", "bsd-2-clause",
+              "isc", "0bsd", "unlicense", "wtfpl"}
+SWH_RAW = "https://archive.softwareheritage.org/api/1/blob/{id}/raw/"
 
 
 def _dl(url: str, dest: str) -> bool:
@@ -100,7 +110,7 @@ def normalize_parquet(parquet_path: str, out_path: str,
                     text = "\n\n".join(parts)
                 else:
                     text = _text_from(rec, text_keys)
-                text = _bc.clean_text(text)
+                text = clean_text(text)
                 if len(text) < 400:                   # min useful doc size
                     continue
                 fh.write(text[:200_000] + SEP)
@@ -113,11 +123,117 @@ def normalize_parquet(parquet_path: str, out_path: str,
     return n
 
 
+
+def swh_fetch_stackedu(parquet_path: str, out_path: str, name: str,
+                       limit: int) -> int:
+    """Metadata rows -> fetch real file contents from Software Heritage,
+    keeping only permissive-license, high-quality files."""
+    from concurrent.futures import ThreadPoolExecutor
+    pf = pq.ParquetFile(parquet_path)
+    print(f"[swh ] scanning {pf.metadata.num_rows:,} rows (streaming)...",
+          flush=True)
+    rows = []
+    for rg in range(pf.num_row_groups):
+        tbl = pf.read_row_group(rg, columns=[
+            "blob_id", "path", "int_score", "license_type"])
+        d = {n_: tbl.column(n_).to_pylist()
+             for n_ in tbl.schema.names}
+        for b, pth, s, l_ in zip(d["blob_id"], d["path"],
+                                 d["int_score"], d["license_type"]):
+            if l_.lower() == "permissive" and s >= 4 \
+                    and pth.lower().endswith(
+                        (".py",) if name.endswith("_py")
+                        else (".md", ".rst")):
+                rows.append((b, pth, s))
+        del tbl
+        print(f"[swh ]   rowgroup {rg + 1}/{pf.num_row_groups}: "
+              f"{len(rows)} candidates so far", flush=True)
+    rows.sort(key=lambda r: -r[2])
+    rows = rows[:limit]
+    ext_ok = (".py",) if name.endswith("_py") else         (".md", ".rst", ".txt")
+    rows = [r for r in rows if r[1].lower().endswith(ext_ok)]
+    print(f"[swh ] {name}: {len(rows)} candidates "
+          f"(permissive, score>=4)", flush=True)
+
+    def grab(row):
+        bid, pth = row[0], row[1]
+        try:
+            req = urllib.request.Request(SWH_RAW.format(id=bid),
+                                         headers={"User-Agent": "indus-tech"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read()
+            text = data.decode("utf-8", errors="replace")
+            return (pth, text) if len(text) > 400 else None
+        except Exception:
+            return None
+
+    n = 0
+    seen = set()
+    ledger = out_path + ".ledger"
+    if os.path.exists(ledger):
+        seen = set(open(ledger).read().split())
+    mode = "a" if seen else "w"
+    fresh = 0
+    with open(out_path, mode, encoding="utf-8") as fh, \
+            open(ledger, "a", encoding="utf-8") as led:
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            for res in ex.map(grab, rows):
+                fresh += 1
+                if not res:
+                    continue
+                key = hash(res[1][:2000])
+                if key in seen:
+                    continue
+                seen.add(key)
+                fh.write(f"# {res[0]}\n"
+                         + clean_text(res[1])[:100_000] + SEP)
+                led.write(res[0] + "\n")
+                n += 1
+                if n % 250 == 0:
+                    fh.flush(); led.flush()
+                    print(f"[swh ] kept {n} ({fresh} fetched)",
+                          flush=True)
+    return n
+
+
+
+def normalize_jsonl(path: str, out_path: str, limit: int) -> int:
+    """Nemotron v1 style: records with input/output or prompt/response."""
+    n = 0
+    seen = set()
+    with open(path, encoding="utf-8") as f, \
+            open(out_path + ".tmp", "w", encoding="utf-8") as o:
+        for line in f:
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            a = (r.get("input") or r.get("prompt") or
+                 r.get("question") or "").strip()
+            b = (r.get("output") or r.get("response") or
+                 r.get("answer") or "").strip()
+            if len(b) < 120:
+                continue
+            doc = (a + "\n" + b).strip() if a else b
+            key = hash(doc[:1500])
+            if key in seen:
+                continue
+            seen.add(key)
+            o.write(clean_text(doc)[:120_000] + SEP)
+            n += 1
+            if n >= limit:
+                break
+    os.replace(out_path + ".tmp", out_path)
+    return n
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--shards", type=int, default=1,
                     help="parquet shards per source (1 = smallest viable)")
     ap.add_argument("--max-docs-per-source", type=int, default=120_000)
+    ap.add_argument("--swh-limit", type=int, default=15_000,
+                help="max permissive GitHub files fetched from SWH per source")
     ap.add_argument("--fineweb-bytes", type=int, default=400_000_000,
                     help="glue-language share from existing FineWeb-Edu txt")
     ap.add_argument("--out-dir", default="corpus_tech")
@@ -125,52 +241,47 @@ def main() -> None:
 
     os.makedirs(args.out_dir, exist_ok=True)
     paths, meta = {}, {}
+    lim = args.max_docs_per_source
 
-    def add(name, url_tpl, norm_kwargs, shard_fmt="{i:02d}"):
-        ok_all, parts = True, []
-        for i in range(args.shards):
-            fname = url_tpl.split("/")[-1]
-            fname = fname.replace("00000", f"{i:05d}")
-            dest = os.path.join("corpus", "raw_" + fname)
-            url = url_tpl
-            if "{i:02d}" == shard_fmt:
-                url = url_tpl.format(i=i)
-            if not _dl(url, dest):
-                ok_all = False
+    # 1) Stack-Edu via Software Heritage (GitHub-derived)
+    se_meta = "corpus/raw_train-00000-of-00005.parquet"   # python metadata
+    md_meta = "corpus/raw_train-00000-of-00005-md.parquet"
+    if _dl("https://huggingface.co/datasets/HuggingFaceTB/stack-edu/resolve/main/Markdown/train-00000-of-00005.parquet", md_meta):
+        for name, metaf, ext in (("stackedu_py", se_meta, (".py",)),
+                                 ("stackedu_md", md_meta, (".md", ".rst"))):
+            if not os.path.exists(metaf):
                 continue
-            part_out = os.path.join(args.out_dir, f"{name}_{i}.txt")
-            n = normalize_parquet(dest, part_out, **norm_kwargs)
-            print(f"[ok  ] {name}[{i}]: {n:,} docs", flush=True)
-            parts.append(part_out)
-        if parts:
-            merged = os.path.join(args.out_dir, f"{name}.txt")
-            with open(merged, "wb") as out:
-                for p_ in parts:
-                    out.write(open(p_, "rb").read())
-                    os.remove(p_)
-            paths[name] = merged
-            meta[name] = {"docs": sum(1 for _ in _bc.iter_docs(merged)),
-                          "license": LICENSES[name]}
-        return ok_all
+            outp = os.path.join(args.out_dir, name + ".txt")
+            n = swh_fetch_stackedu(metaf, outp, name,
+                                   limit=args.swh_limit)
+            if n:
+                paths[name] = outp
+                meta[name] = {"docs": n, "license": LICENSES[name]}
+                print(f"[ok  ] {name}: {n:,} docs", flush=True)
 
-    add("stackedu_py",
-        SOURCES_URL["stackedu_py"],
-        dict(text_keys=["content", "code", "text"], max_docs=args.max_docs_per_source))
-    add("stackedu_md",
-        SOURCES_URL["stackedu_md"],
-        dict(text_keys=["content", "text", "markdown"], max_docs=args.max_docs_per_source))
-    add("nemotron_code",
-        SOURCES_URL["nemotron_code"],
-        dict(join_fields=[("input", "output"), ("prompt", "response"),
-                          ("question", "response")],
-             max_docs=args.max_docs_per_source))
-    add("nemotron_stem",
-        SOURCES_URL["nemotron_stem"],
-        dict(join_fields=[("input", "output"), ("prompt", "response"),
-                          ("question", "response")],
-             max_docs=args.max_docs_per_source))
+    # 2) OpenWebMath sample shard
+    owm = os.path.join("corpus", "raw_owm_0.parquet")
+    if _dl(SOURCES_URL["openwebmath"].format(shard="00000"), owm):
+        outp = os.path.join(args.out_dir, "openwebmath.txt")
+        n = normalize_parquet(owm, outp, text_keys=["text"],
+                              max_docs=lim)
+        if n:
+            paths["openwebmath"] = outp
+            meta["openwebmath"] = {"docs": n, "license": LICENSES["openwebmath"]}
+            print(f"[ok  ] openwebmath: {n:,} docs", flush=True)
 
-    # glue language from already-normalized FineWeb-Edu
+    # 3) Nemotron v1 JSONLs (CC-BY-4.0)
+    for key, rel in NEMOTRON_V1.items():
+        dest = os.path.join("corpus", "raw_" + rel.replace("/", "_"))
+        if _dl(HF + "/nvidia/Llama-Nemotron-Post-Training-Dataset/resolve/main/" + rel, dest):
+            outp = os.path.join(args.out_dir, key + ".txt")
+            n = normalize_jsonl(dest, outp, limit=lim)
+            if n:
+                paths[key] = outp
+                meta[key] = {"docs": n, "license": LICENSES[key]}
+                print(f"[ok  ] {key}: {n:,} docs", flush=True)
+
+    # 4) FineWeb-Edu glue
     fw_src = os.path.join(ROOT, "corpus", "fineweb-edu.txt")
     if os.path.exists(fw_src) and args.fineweb_bytes > 0:
         dst = os.path.join(args.out_dir, "fineweb_edu.txt")

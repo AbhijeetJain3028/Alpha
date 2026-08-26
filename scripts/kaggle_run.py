@@ -161,6 +161,7 @@ def render_kernel(args) -> Path:
     src = src.replace("__EVAL_EVERY__", str(args.eval_every))
     src = src.replace("__NUMBERED_EVERY__", str(args.numbered_every))
     src = src.replace("__PATIENCE__", str(args.patience))
+    src = src.replace("__USE_MUON__", "1" if args.use_muon else "0")
 
     script = folder / "indus_train_kernel.py"
     script.write_text(src)
@@ -290,6 +291,8 @@ def main() -> None:
     p.add_argument("--numbered-every", type=int, default=2000)
     p.add_argument("--patience", type=int, default=4,
                    help="stop after this many evals without val improvement")
+    p.add_argument("--use-muon", action="store_true",
+                   help="Muon(matrices)+AdamW(vectors) optimizer stack")
     p.add_argument("--no-internet", action="store_true")
     p.add_argument("--accelerator", default="NvidiaTeslaT4",
                    choices=["NvidiaTeslaT4", "NvidiaTeslaP100"])
