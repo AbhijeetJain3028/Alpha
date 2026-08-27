@@ -62,6 +62,38 @@ PERMISSIVE = {"mit", "apache-2.0", "bsd-3-clause", "bsd-2-clause",
 SWH_RAW = "https://archive.softwareheritage.org/api/1/blob/{id}/raw/"
 
 
+def _dl_capped(url: str, dest: str, cap_bytes: int,
+               headers: dict | None = None) -> bool:
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        return True
+    print(f"[get ] {os.path.basename(dest)} (cap {cap_bytes//10**6} MB)",
+          flush=True)
+    req = urllib.request.Request(url, headers=headers or UA_HDR)
+    tmp = dest + ".part"
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r, \
+                open(tmp, "wb") as o:
+            got = 0
+            while got < cap_bytes:
+                chunk = r.read(1 << 22)
+                if not chunk:
+                    break
+                take = min(len(chunk), cap_bytes - got)
+                o.write(chunk[:take])
+                got += take
+    except Exception as e:
+        print(f"[warn] {e}")
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return False
+    os.replace(tmp, dest)
+    return True
+
+
+UA_HDR = {"User-Agent": "indus-tech",
+          "Authorization": "Bearer " + os.environ.get("HF_TOKEN", "")}
+
+
 def _dl(url: str, dest: str) -> bool:
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         return True
@@ -232,8 +264,8 @@ def main() -> None:
     ap.add_argument("--shards", type=int, default=1,
                     help="parquet shards per source (1 = smallest viable)")
     ap.add_argument("--max-docs-per-source", type=int, default=120_000)
-    ap.add_argument("--swh-limit", type=int, default=15_000,
-                help="max permissive GitHub files fetched from SWH per source")
+    ap.add_argument("--jsonl-cap-mb", type=int, default=1500,
+                help="streaming cap per Nemotron JSONL (MB)")
     ap.add_argument("--fineweb-bytes", type=int, default=400_000_000,
                     help="glue-language share from existing FineWeb-Edu txt")
     ap.add_argument("--out-dir", default="corpus_tech")
@@ -273,7 +305,7 @@ def main() -> None:
     # 3) Nemotron v1 JSONLs (CC-BY-4.0)
     for key, rel in NEMOTRON_V1.items():
         dest = os.path.join("corpus", "raw_" + rel.replace("/", "_"))
-        if _dl(HF + "/nvidia/Llama-Nemotron-Post-Training-Dataset/resolve/main/" + rel, dest):
+        if _dl_capped(HF + "/nvidia/Llama-Nemotron-Post-Training-Dataset/resolve/main/" + rel, dest, args.jsonl_cap_mb * 10**6):
             outp = os.path.join(args.out_dir, key + ".txt")
             n = normalize_jsonl(dest, outp, limit=lim)
             if n:
