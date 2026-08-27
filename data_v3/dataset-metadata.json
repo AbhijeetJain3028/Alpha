@@ -1,0 +1,6 @@
+{
+  "title": "Indus Corpus v3",
+  "id": "abhijeetjain4075/indus-corpus-v3",
+  "licenses": [{"name": "CC0-1.0"}],
+  "description": "Phase-2 technical corpus: 576M tokens (FineWeb-Edu + OpenWebMath + Nemotron v1 code/math/science), 4100 vocab BPE with chat specials"
+}

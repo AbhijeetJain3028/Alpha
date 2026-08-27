@@ -285,7 +285,7 @@ def main() -> None:
                 continue
             outp = os.path.join(args.out_dir, name + ".txt")
             n = swh_fetch_stackedu(metaf, outp, name,
-                                   limit=args.swh_limit)
+                                   limit=15000)
             if n:
                 paths[name] = outp
                 meta[name] = {"docs": n, "license": LICENSES[name]}
