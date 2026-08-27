@@ -34,3 +34,5 @@ knowledge/
 
 # local export output
 out/
+*.txt
+*.tmp
